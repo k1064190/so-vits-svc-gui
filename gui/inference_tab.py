@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
 )
 
 from audio_player import AudioPlayer
-from gui.f0 import f0Manager
+from manager.f0 import f0Manager
 from ui_utils import get_audio_devices, get_available_devices, load_json_file, save_json_file
 from widgets_visibility_manager import WidgetVisibilityManager
 

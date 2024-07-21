@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 import numpy as np
 import torch
-import torchcrepe
+from f0 import crepe
 from cm_time import timer
 from numpy import dtype, float32, ndarray
 from torch import FloatTensor, Tensor
@@ -13,7 +13,7 @@ from torch import FloatTensor, Tensor
 LOG = getLogger(__name__)
 
 class f0Manager:
-    def __init__(self):
+    def __init__(self, device = "cpu"):
         self.f0_bin = 256
         self.f0_max = 1100.0
         self.f0_min = 50.0
@@ -21,60 +21,41 @@ class f0Manager:
         self.f0_mel_max = 1127 * np.log(1 + self.f0_max / 700)
         self.f0_modes = ["crepe", "rmvpe", "fcpe", "none"]
 
-    def compute_f0(
-            self,
-            wav_numpy: ndarray[Any, dtype[float32]],
-            p_len: None | int = None,
-            sampling_rate: int = 44100,
-            hop_length: int = 512,
-            method: str = "crepe",
-            f0_methods: list = [],
-            **kwargs,
-    ):
-        with timer() as t:
-            wav_numpy = wav_numpy.astype(np.float32)
-            wav_numpy /= np.quantile(np.abs(wav_numpy), 0.999)
-            function_name = f"compute_f0_{method}"
-            if method not in f0_methods:
-                raise ValueError(f"Unsupported f0 method: {method}, available: {f0_methods}")
-            f0 = getattr(self, function_name)(wav_numpy, p_len, sampling_rate, hop_length, **kwargs)
-        rtf = t.elapsed / (len(wav_numpy) / sampling_rate)
-        LOG.info(f"F0 inference time:       {t.elapsed:.3f}s, RTF: {rtf:.3f}")
-        return f0
+    def initialize(self, f0_predictor, hop_size, target_sample, device, cr_threshold=0.05):
+        self.hop_size = hop_size
+        self.target_sample = target_sample
+        self.device = device
+        self.f0_predictor_object = self.get_f0_predictor(f0_predictor, hop_length=self.hop_size, f0_min=self.f0_min, f0_max=self.f0_max, sampling_rate=target_sample, device=self.device, threshold=cr_threshold)
 
-    def compute_f0_crepe(
-            self,
-            wav_numpy: ndarray[Any, dtype[float32]],
-            p_len: None | int = None,
-            sampling_rate: int = 44100,
-            hop_length: int = 512,
-            device: str | torch.device = "cpu",
-            model: Literal["full", "tiny"] = "full",
-    ):
-        audio = torch.from_numpy(wav_numpy).to(device, copy=True)
-        audio = torch.unsqueeze(audio, dim=0)
+    def get_f0_predictor(self, f0_predictor, hop_length, f0_min, f0_max, sampling_rate, **kargs):
+        if f0_predictor == "crepe":
+            from modules.F0Predictor.CrepeF0Predictor import CrepeF0Predictor
+            f0_predictor_object = CrepeF0Predictor(hop_length=hop_length, f0_min=f0_min, f0_max=f0_max, sampling_rate=sampling_rate,
+                                                   device=kargs["device"], threshold=kargs["threshold"])
+        elif f0_predictor == "rmvpe":
+            from modules.F0Predictor.RMVPEF0Predictor import RMVPEF0Predictor
+            f0_predictor_object = RMVPEF0Predictor(hop_length=hop_length, f0_min=f0_min, f0_max=f0_max, sampling_rate=sampling_rate,
+                                                   dtype=torch.float32, device=kargs["device"],
+                                                   threshold=kargs["threshold"])
+        elif f0_predictor == "fcpe":
+            from modules.F0Predictor.FCPEF0Predictor import FCPEF0Predictor
+            f0_predictor_object = FCPEF0Predictor(hop_length=hop_length, f0_min=f0_min, f0_max=f0_max, sampling_rate=sampling_rate,
+                                                  dtype=torch.float32, device=kargs["device"],
+                                                  threshold=kargs["threshold"])
+        else:
+            raise Exception(f"Unsupported f0 predictor: {f0_predictor}, available: {self.f0_modes}")
+        return f0_predictor_object
 
-        if audio.ndim == 2 and audio.shape[0] > 1:
-            audio = torch.mean(audio, dim=0, keepdim=True).detach()
-        # (T) -> (1, T)
-        audio = audio.detach()
+    def get_f0(self, wav, tran):
+        f0, uv = self.f0_predictor_object.compute_f0_uv(wav)
 
-        pitch: Tensor = torchcrepe.predict(
-            audio,
-            sampling_rate,
-            hop_length,
-            self.f0_min,
-            self.f0_max,
-            model,
-            batch_size=hop_length * 2,
-            device=device,
-            pad=True,
-        )
+        f0 = torch.FloatTensor(f0).to(self.device)
+        uv = torch.FloatTensor(uv).to(self.device)
 
-        f0 = pitch.squeeze(0).cpu().float().numpy()
-        p_len = p_len or wav_numpy.shape[0] // hop_length
-        f0 = self._resize_f0(f0, p_len)
-        return f0
+        f0 = f0 * 2 ** (tran / 12)
+        f0 = f0.unsqueeze(0)
+        uv = uv.unsqueeze(0)
+        return f0, uv
 
 
     def f0_to_coarse(self, f0: torch.Tensor | float):
