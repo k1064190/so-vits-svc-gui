@@ -17,7 +17,7 @@ from ui_utils import get_audio_devices, get_available_devices, load_json_file, s
 from widgets_visibility_manager import WidgetVisibilityManager
 
 
-class InferenceTab(QWidget):
+class TrainTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setup_data()
@@ -28,9 +28,9 @@ class InferenceTab(QWidget):
     def setup_data(self):
         self.f0_manager = f0.f0Manager()
         self.f0_modes = self.f0_manager.f0_modes
-        self.speech_encoder = speech_encoder.SpeechEncoder()
+        self.speech_encoder = speech_encoder.SpeechEncoderManager()
         self.speech_encoder_modes = self.speech_encoder.speech_encoder_modes
-        self.svc = svc.SVC()
+        self.svc = svc.SVCManager()
         self.svc_modes = self.svc.svc_modes
         # self.svc_modes = ["so-vits"]
         self.post_processing = post_processing.PostProcessing()

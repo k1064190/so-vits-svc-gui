@@ -5,7 +5,6 @@ from typing import Any, Literal
 
 import numpy as np
 import torch
-from f0 import crepe
 from cm_time import timer
 from numpy import dtype, float32, ndarray
 from torch import FloatTensor, Tensor
@@ -13,19 +12,48 @@ from torch import FloatTensor, Tensor
 LOG = getLogger(__name__)
 
 class f0Manager:
-    def __init__(self, device = "cpu"):
+    def __init__(self):
+        self.device = "cpu"
         self.f0_bin = 256
         self.f0_max = 1100.0
         self.f0_min = 50.0
         self.f0_mel_min = 1127 * np.log(1 + self.f0_min / 700)
         self.f0_mel_max = 1127 * np.log(1 + self.f0_max / 700)
-        self.f0_modes = ["crepe", "rmvpe", "fcpe", "none"]
+        self.f0_modes = ["crepe", "rmvpe", "fcpe"]
+        self.f0_predictor = None
+        self.f0_predictor_object = None
 
-    def initialize(self, f0_predictor, hop_size, target_sample, device, cr_threshold=0.05):
+    def initialize(self, f0_predictor, hop_size=512, target_sample=44100, device="cpu", cr_threshold=0.05):
+        '''
+
+        Args:
+            f0_predictor: ['crepe', 'rmvpe', 'fcpe']
+            hop_size: hop size for f0 predictor(default: 512)
+            target_sample: target sample rate for f0 predictor
+            device: device for f0 predictor
+            cr_threshold: threshold for f0 predictor(default: 0.05)(higher -> more silent frames, but precise)
+
+        Returns: f0_predictor
+        '''
+        self.device = device
+
         self.hop_size = hop_size
         self.target_sample = target_sample
         self.device = device
-        self.f0_predictor_object = self.get_f0_predictor(f0_predictor, hop_length=self.hop_size, f0_min=self.f0_min, f0_max=self.f0_max, sampling_rate=target_sample, device=self.device, threshold=cr_threshold)
+        self.cr_threshold = cr_threshold
+        # if the arguments are different, reinitialize the f0_predictor
+        if f0_predictor is None or self.f0_predictor != f0_predictor or \
+                self.hop_size != hop_size or self.target_sample != target_sample or self.device != device or \
+                self.cr_threshold != cr_threshold:
+            self.f0_predictor = f0_predictor
+            self.f0_predictor_object = self.get_f0_predictor(f0_predictor=self.f0_predictor,
+                                                             hop_length=self.hop_size,
+                                                             f0_min=self.f0_min,
+                                                             f0_max=self.f0_max,
+                                                             sampling_rate=self.target_sample,
+                                                             device=self.device,
+                                                             threshold=self.cr_threshold)
+        return self.f0_predictor_object
 
     def get_f0_predictor(self, f0_predictor, hop_length, f0_min, f0_max, sampling_rate, **kargs):
         if f0_predictor == "crepe":
