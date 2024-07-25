@@ -26,14 +26,15 @@ class InferenceTab(QWidget):
         self.initialize_widget_visibility()
 
     def setup_data(self):
-        self.f0_manager = f0.f0Manager()
+        self.inference_manager = infer_manager.InferManager()
+        self.f0_manager = self.inference_manager.f0
         self.f0_modes = self.f0_manager.f0_modes
-        self.speech_encoder = speech_encoder.SpeechEncoder()
+        self.speech_encoder = self.inference_manager.speech_encoder
         self.speech_encoder_modes = self.speech_encoder.speech_encoder_modes
-        self.svc = svc.SVC()
+        self.svc = self.inference_manager.svc
         self.svc_modes = self.svc.svc_modes
         # self.svc_modes = ["so-vits"]
-        self.post_processing = post_processing.PostProcessing()
+        self.post_processing = self.inference_manager.post_processing
         self.post_processing_modes = self.post_processing.post_processing_modes
         # self.post_processing_modes = ["NSF-HifiGAN", "shallow_diffusion"]
         self.input_devices, self.output_devices = get_audio_devices()
@@ -45,20 +46,23 @@ class InferenceTab(QWidget):
             "model_path": None,
             "config_path": None,
             "cluster_model_path": None,
-            "speaker": None,
+            "speaker": 0,
             "silence_threshold": 0,
             "pitch_shift": 0,
             "noise_scale": 0,
             "pad_seconds": 0,
             "chunk_seconds": 0,
             "max_chunk_seconds": 0,
-            "absolute_thresh": False,
+            "linear_gradient": 0,
+            "linear_gradient_retain": 0,
+            "retrieval": False,
             "f0_modification": False,
+            "use_volume": False,
             "auto_predict_f0": False,
             "f0": 0,
-            "speech_encoder": [False] * len(self.speech_encoder_modes),
             "svc": 0,
-            "post_processing": [False] * len(self.post_processing_modes),
+            "speech_encoder": None,
+            "post_processing": 0,
         }
         self.realtime_arguments = {
             "realtime": False,
@@ -67,16 +71,10 @@ class InferenceTab(QWidget):
             "additional_infer_before_seconds": 0,
             "additional_infer_after_seconds": 0,
         }
-        self.retrieval_arguments = {
-            "retrieval": False,
-            "retrieval_ratio": 0.5,
-            "n_retrieval_vectors": 3,
-        }
         self.run_arguments = {"f0_modification": False}
         self.file_arguments = {"input_audio": None, "output_audio": None}
         self.device_arguments = {"device": 0, "input_device": 0, "output_device": 0}
 
-        self.retrieval_widgets = []
         self.f0_modification_widgets = []
         self.created_widgets = []
 
@@ -114,9 +112,26 @@ class InferenceTab(QWidget):
         paths_group = QGroupBox("Paths")
         paths_layout = QVBoxLayout(paths_group)
         paths_layout.addWidget(self.create_path_input("Model path", "Select Model File", self.common_arguments, "model_path"))
-        paths_layout.addWidget(self.create_path_input("Config path", "Select Config File", self.common_arguments, "config_path"))
+        self.config = self.create_path_input("Config path", "Select Config File", self.common_arguments, "config_path")
+        paths_layout.addWidget(self.config)
+
+        # Load config file on config file change and reflect its change on the UI
+        self.config_line_edit = self.config.layout().itemAt(1).widget()
+        self.config_btn = self.config.layout().itemAt(2).widget()
+        self.config_line_edit.returnPressed.connect(self.load_config)
+        self.config_btn.clicked.connect(self.load_config)
+
         paths_layout.addWidget(self.create_path_input("Cluster model path (Optional)", "Select Cluster Model File", self.common_arguments, "cluster_model_path"))
         return paths_group
+
+    def load_config(self):
+        config_path = self.config_line_edit.text()
+        self.inference_manager.load_config(config_path)
+        self.spk = self.inference_manager.hps_ms.spk.keys()
+
+        # Set the speaker combo box with the available speakers
+        self.clear_combo_box(self.speaker_box, self.spk, 0)
+        self.common_arguments["speaker"] = 0
 
     def create_common_group(self) -> QScrollArea:
         common_scroll_area = QScrollArea()
@@ -124,22 +139,28 @@ class InferenceTab(QWidget):
         common_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         common_group = QGroupBox("Common")
         common_layout = QVBoxLayout(common_group)
-        
-        common_layout.addWidget(QLabel("Speaker"))
-        common_layout.addWidget(QComboBox())
+
+        self.speaker_widget = self.create_combo_box("Speaker", [], self.common_arguments, "speaker", 1)
+        self.speaker_box = self.speaker_widget.layout().itemAt(1).widget()
+        common_layout.addWidget(self.speaker_widget)
         common_layout.addWidget(self.create_slider("Silence threshold", -35.0, -100.0, 0.0, 1.0, self.common_arguments, "silence_threshold"))
-        common_layout.addWidget(self.create_slider("Pitch", 12, -24, 36, 1, self.common_arguments, "pitch_shift"))
+        common_layout.addWidget(self.create_slider("Transpose(Pitch Shift)(12 = 1 Octave)", 0, -24, 24, 1, self.common_arguments, "pitch_shift"))
         common_layout.addWidget(self.create_slider("Noise scale", 0.40, 0.0, 1.0, 0.01, self.common_arguments, "noise_scale"))
         common_layout.addWidget(self.create_slider("Pad seconds", 0.10, 0.0, 1.0, 0.01, self.common_arguments, "pad_seconds"))
-        common_layout.addWidget(self.create_slider("Chunk seconds", 0.50, 0.0, 1.0, 0.01, self.common_arguments, "chunk_seconds"))
+        common_layout.addWidget(self.create_slider("Chunk seconds(No Clip When 0)", 0.50, 0.0, 1.0, 0.01, self.common_arguments, "chunk_seconds"))
+        common_layout.addWidget(self.create_slider("Linear Gradient", 0.0, 0.0, 1.0, 0.01, self.common_arguments, "linear_gradient"))
+        common_layout.addWidget(self.create_slider("Linear Gradient Retain", 0.75, 0.0, 1.0, 0.01, self.common_arguments, "linear_gradient_retain"))
+
+        # Cluster, feature retrieval
+        common_layout.addWidget(self.create_check_box("Feature Retrieval(Cluster required)", self.common_arguments, "retrieval"))
+
         common_layout.addWidget(self.create_slider("Max chunk seconds", 40.0, 0.0, 200.0, 1, self.common_arguments, "max_chunk_seconds"))
-        common_layout.addWidget(self.create_check_box("Absolute threshold", self.common_arguments, "absolute_thresh"))
         common_layout.addWidget(self.create_radio_button("F0 method", self.f0_modes, self.common_arguments, "f0"))
-        
-        common_layout.addWidget(self.create_retrieval_widgets())
-        
+        common_layout.addWidget(self.create_check_box("Auto predict F0", self.common_arguments, "auto_predict_f0"))
+        common_layout.addWidget(self.create_check_box("Use volume", self.common_arguments, "use_volume"))
+
         if self.devices:
-            common_layout.addWidget(self.create_combo_box("Device", [device[0] for device in self.devices], self.device_arguments, "device"))
+            common_layout.addWidget(self.create_combo_box("Device",  [device[0] for device in self.devices], self.device_arguments, "device"))
         else:
             common_layout.addWidget(QLabel("No suitable devices found."))
             self.available = False
@@ -149,30 +170,6 @@ class InferenceTab(QWidget):
 
         common_scroll_area.setWidget(common_group)
         return common_scroll_area
-
-    def create_retrieval_widgets(self) -> QGroupBox:
-        retrieval_widget = self.create_check_box("Retrieval", self.retrieval_arguments, "retrieval")
-        retrieval_checkbox = retrieval_widget.layout().itemAt(0).widget()
-        
-        retrieval_ratio = self.create_slider("Retrieval ratio", 0.5, 0.0, 1.0, 0.01, self.retrieval_arguments, "retrieval_ratio")
-        self.retrieval_widgets.append(retrieval_ratio)
-        
-        n_retrieval_vectors = self.create_slider("Number of retrieval vectors", 3, 1, 10, 1, self.retrieval_arguments, "n_retrieval_vectors")
-        self.retrieval_widgets.append(n_retrieval_vectors)
-
-        WidgetVisibilityManager.toggle_widgets_visibility(self.retrieval_widgets, True)
-        retrieval_checkbox.stateChanged.connect(
-            lambda state: WidgetVisibilityManager.toggle_widgets_visibility(self.retrieval_widgets, not state)
-        )
-        retrieval_checkbox.setChecked(False)
-
-        retrieval_group = QGroupBox()
-        retrieval_layout = QVBoxLayout(retrieval_group)
-        retrieval_layout.addWidget(retrieval_widget)
-        retrieval_layout.addWidget(retrieval_ratio)
-        retrieval_layout.addWidget(n_retrieval_vectors)
-
-        return retrieval_group
 
     def create_file_group(self) -> QGroupBox:
         file_group = QGroupBox("File")
@@ -190,7 +187,7 @@ class InferenceTab(QWidget):
     def create_run_arguments_group(self) -> QGroupBox:
         run_arguments_group = QGroupBox("Run Arguments")
         run_arguments_layout = QHBoxLayout(run_arguments_group)
-        f0_modification_widget = self.create_check_box("F0 Modification")
+        f0_modification_widget = self.create_button("F0 Modification", lambda: {})
         run_arguments_layout.addWidget(f0_modification_widget)
         button = self.create_button("Run", lambda: {})
         run_arguments_layout.addWidget(button)
@@ -220,6 +217,8 @@ class InferenceTab(QWidget):
         preset_select = self.create_combo_box("Select preset", list(self.presets.keys()))
         preset_combo_box = preset_select.layout().itemAt(1).widget()
         preset_combo_box.currentIndexChanged.connect(lambda: self.load_gui_preset(preset_combo_box.currentText()))
+        if preset_combo_box.count() > 0:
+            self.load_gui_preset(preset_combo_box.currentText())
         preset_select_delete.addWidget(preset_select, stretch=4)
         preset_delete = QPushButton("Delete")
         preset_delete.clicked.connect(lambda: self.delete_current_preset(preset_combo_box))
@@ -236,7 +235,6 @@ class InferenceTab(QWidget):
 
         preset_layout.addLayout(preset_select_delete)
         preset_layout.addLayout(preset_name_add)
-        self.load_gui_preset(preset_combo_box.currentText())
         return preset_group
 
     def setup_connections(self) -> None:
@@ -274,14 +272,19 @@ class InferenceTab(QWidget):
         layout.addWidget(browse_button)
         widget = QWidget()
 
+        def update() -> None:
+            if arguments_dict is not None and var_name is not None:
+                arguments_dict[var_name] = line_edit.text()
+
         def open_file_dialog() -> None:
             file_path, _ = QFileDialog.getOpenFileName(self, dialog_title, "", "All Files (*)")
             if file_path:
                 line_edit.setText(file_path)
+                update()
 
         browse_button.clicked.connect(open_file_dialog)
         if arguments_dict is not None and var_name is not None:
-            line_edit.textChanged.connect(lambda: arguments_dict.__setitem__(var_name, line_edit.text()))
+            line_edit.returnPressed.connect(update)
             def update_line_edit() -> None:
                 text = arguments_dict[var_name]
                 if text is not None:
@@ -292,9 +295,12 @@ class InferenceTab(QWidget):
         self.created_widgets.append(widget)
         return widget
 
-    def create_combo_box(self, label: str, items: List[str], arguments_dict: Optional[Dict[str, Any]] = None, var_name: Optional[str] = None) -> QWidget:
+    def create_combo_box(self, label: str, items: List[str], arguments_dict: Optional[Dict[str, Any]] = None, var_name: Optional[str] = None, direction: int = 0) -> QWidget:
         widget = QWidget()
-        layout = QVBoxLayout()
+        if direction == 0:
+            layout = QVBoxLayout()
+        else:
+            layout = QHBoxLayout()
         layout.addWidget(QLabel(label))
         combo_box = QComboBox()
         combo_box.addItems(items)
@@ -329,9 +335,12 @@ class InferenceTab(QWidget):
         widget = QWidget()
         layout = QVBoxLayout()
         check_box = QCheckBox(label)
+        def update() -> None:
+            if arguments_dict is not None and var_name is not None:
+                arguments_dict[var_name] = check_box.isChecked()
         if arguments_dict is not None and var_name is not None:
-            check_box.stateChanged.connect(lambda: arguments_dict.__setitem__(var_name, check_box.isChecked()))
-            arguments_dict.__setitem__(var_name, check_box.isChecked())
+            check_box.stateChanged.connect(lambda: update)
+            update()
             def update_check_box() -> None:
                 checked = arguments_dict[var_name]
                 if checked is not None:
@@ -346,12 +355,16 @@ class InferenceTab(QWidget):
         widget = QWidget()
         layout = QHBoxLayout()
         layout.addWidget(QLabel(label))
+        def update(idx, var_name) -> None:
+            if arguments_dict is not None and var_name is not None:
+                arguments_dict[var_name] = idx
+        update(0, var_name)
         for idx, item in enumerate(items):
             radio_button = QRadioButton(item)
             if arguments_dict is not None and var_name is not None:
                 if arguments_dict[var_name] == idx:
                     radio_button.setChecked(True)
-                radio_button.toggled.connect(partial(lambda idx, var_name, checked: arguments_dict.__setitem__(var_name, idx) if checked else None, idx, var_name))
+                radio_button.toggled.connect(lambda checked: update(idx, var_name) if checked else None)
             layout.addWidget(radio_button)
         widget.setLayout(layout)
         if arguments_dict is not None and var_name is not None:
@@ -364,13 +377,14 @@ class InferenceTab(QWidget):
         return widget
 
     def create_slider(self, label: str, value: float, min: float = 0.0, max: float = 100.0, step: float = 0.5, arguments_dict: Optional[Dict[str, Any]] = None, var_name: Optional[str] = None) -> QWidget:
+        VALUE_MULTIPLIER = 100
         widget = QWidget()
-        min = int(min * 10)
-        max = int(max * 10)
-        value = int(value * 10)
-        step = int(step * 10)
+        min = int(min * VALUE_MULTIPLIER)
+        max = int(max * VALUE_MULTIPLIER)
+        value = int(value * VALUE_MULTIPLIER)
+        step = int(step * VALUE_MULTIPLIER)
         layout = QVBoxLayout()
-        qlabel = QLabel(f"{label}: {value / 10}")
+        qlabel = QLabel(f"{label}: {value / VALUE_MULTIPLIER}")
         layout.addWidget(qlabel)
         slider = QSlider(Qt.Horizontal)
         slider.setMaximum(max)
@@ -380,16 +394,16 @@ class InferenceTab(QWidget):
         slider.setValue(int(value))  # Assuming slider range 0-100
         def update():
             value = slider.value()
-            qlabel.setText(f"{label}: {value / 10}")
+            qlabel.setText(f"{label}: {value / VALUE_MULTIPLIER}")
             if arguments_dict is not None and var_name is not None:
-                arguments_dict[var_name] = value / 10
+                arguments_dict[var_name] = value / VALUE_MULTIPLIER
         slider.valueChanged.connect(update)
         update()
         if arguments_dict is not None and var_name is not None:
             def update_slider() -> None:
                 slider_value = arguments_dict[var_name]
                 if slider_value is not None:
-                    slider.setValue(int(slider_value * 10))
+                    slider.setValue(int(slider_value * VALUE_MULTIPLIER))
                     qlabel.setText(f"{label}: {slider_value}")
             setattr(widget, "renew", update_slider)
         layout.addWidget(slider)
@@ -400,13 +414,11 @@ class InferenceTab(QWidget):
     def load_gui_preset(self, preset_name: str) -> None:
         # Preset is dictionary with keys as the variable names
         preset = self.presets[preset_name]
-        # common, realtime, retrieval arguments
+        # common, realtime arguments
         for key, value in preset["common"].items():
             self.common_arguments[key] = value
         for key, value in preset["realtime"].items():
             self.realtime_arguments[key] = value
-        for key, value in preset["retrieval"].items():
-            self.retrieval_arguments[key] = value
         # We should update sliders, checkboxes, etc. with the new values
         for widget in self.created_widgets:
             if hasattr(widget, "renew"):
@@ -420,24 +432,20 @@ class InferenceTab(QWidget):
         preset = {}
         common = {}
         realtime = {}
-        retrieval = {}
-        # common, realtime, file, run_arguments, retrieval
+        # common, realtime, file, run_arguments
         for key, value in self.common_arguments.items():
             common[key] = value
         for key, value in self.realtime_arguments.items():
             realtime[key] = value
-        for key, value in self.retrieval_arguments.items():
-            retrieval[key] = value
         preset["common"] = common
         preset["realtime"] = realtime
-        preset["retrieval"] = retrieval
         self.presets[preset_name] = preset
         save_json_file(self.preset_folder, preset_name, preset)
         # combo_box_widget > layout > label, combo_box
         if combo_box is not None:
             self.clear_combo_box(combo_box, list(self.presets.keys()), preset_name)
 
-    def save_gui_preset(self, preset_name: str, combo_box: Optional[QComboBox] = None) -> None:
+    def delete_gui_preset(self, combo_box: Optional[QComboBox] = None) -> None:
         preset_name = combo_box.currentText()
         idx = combo_box.currentIndex()
         del self.presets[preset_name]
@@ -445,6 +453,18 @@ class InferenceTab(QWidget):
         os.remove(f"presets/{preset_name}.json")
         # Set the combo box to the previous index
         self.clear_combo_box(combo_box, list(self.presets.keys()), idx-1)
+
+    def load_model(self):
+        model_path = self.common_arguments["model_path"]
+        config_path = self.common_arguments["config_path"]
+        cluster_model_path = self.common_arguments["cluster_model_path"]
+        self.common_arguments["model"] = self.inference_manager.load_model(model_path, config_path, cluster_model_path)
+
+    def run(self):
+        #
+
+        # Pass inference arguments to inference manager
+        self.inference_manager.load_model(self.common_arguments)
 
     def closeEvent(self, ev: QCloseEvent) -> None:
         ev.accept()

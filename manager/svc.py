@@ -18,6 +18,9 @@ import cluster
 import utils
 from diffusion.unit2mel import load_model_vocoder
 from inference import slicer
+from manager.f0 import f0Manager
+from manager.post_processing import PostProcessingManager
+from manager.speech_encoder import SpeechEncoderManager
 from models import SynthesizerTrn
 
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
@@ -118,101 +121,120 @@ class F0FilterException(Exception):
 
 class SVCManager():
     def __init__(self):
-        self.svc_modes = ["so-vits"]
+        self.device = "cpu"
+        self.svc_modes = ["so-vits-4.0"]
         self.svc = None
         self.svc_object = None
         self.hps_ms = None
 
-    def initialize(self, svc, model_path, config_path, cluster_model, enhance, diffusion_model_path, diffusion_config_path, use_spk_mix, feature_retrieval):
-        self.svc_model = self.get_svc(svc, model_path, config_path, cluster_model, enhance, diffusion_model_path,
-                                      diffusion_config_path, use_spk_mix,
-                                      feature_retrieval)
-        self.hps_ms = self.svc_model.hps_ms
+    def initialize(self, svc, model_path, config, cluster_model_path, use_spk_mix, feature_retrieval,
+                   pad_seconds=0.5, clip_seconds=0, lg_num=0, lgr_num=0.75, device="cpu"):
+        self.device = device
 
-    def get_svc(self, svc, model_path, config_path, cluster_model, use_spk_mix, feature_retrieval):
+        self.pad_seconds = pad_seconds
+        self.clip_seconds = clip_seconds
+        self.lg_num = lg_num
+        self.lgr_num = lgr_num
+
+        self.svc = svc
+        self.svc_object = self.get_svc(svc, model_path, config, cluster_model_path, use_spk_mix, feature_retrieval,
+                                       pad_seconds, clip_seconds, lg_num, lgr_num, device)
+        self.hps_ms = self.svc_object.hps_ms
+        self.spk2id = self.svc_object.spk2id
+        self.speech_encoder = self.svc_object.speech_encoder
+
+
+    def get_svc(self, svc, model_path, config, cluster_model_path, use_spk_mix, feature_retrieval,
+                pad_seconds, clip_seconds, lg_num, lgr_num, device):
         if svc == "so-vits":
-            return Svc(model_path, config_path, cluster_model, enhance,
-                       use_spk_mix, feature_retrieval)
+            return Svc(model_path, config, cluster_model_path, use_spk_mix, feature_retrieval,
+                       pad_seconds, clip_seconds, lg_num, lgr_num, device)
         else:
             raise Exception(f"Unsupported svc: {svc}, available: {self.svc_modes}")
 
-class Svc(object):
-    def __init__(self, net_g_path, config_path,
-                 device=None,
-                 cluster_model_path=None,
-                 nsf_hifigan_enhance=False,
-                 diffusion_model_path=None,
-                 diffusion_config_path=None,
-                 shallow_diffusion=False,
-                 only_diffusion=False,
-                 spk_mix_enable=False,
-                 feature_retrieval=False
-                 ):
-        self.net_g_path = net_g_path
-        self.only_diffusion = only_diffusion
-        self.shallow_diffusion = shallow_diffusion
-        self.feature_retrieval = feature_retrieval
-        if device is None:
-            self.dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            self.dev = torch.device(device)
-        self.net_g_ms = None
-        if not self.only_diffusion:
-            self.hps_ms = utils.get_hparams_from_file(config_path, True)
-            self.target_sample = self.hps_ms.data.sampling_rate
-            self.hop_size = self.hps_ms.data.hop_length
-            self.spk2id = self.hps_ms.spk
-            self.unit_interpolate_mode = self.hps_ms.data.unit_interpolate_mode if self.hps_ms.data.unit_interpolate_mode is not None else 'left'
-            self.vol_embedding = self.hps_ms.model.vol_embedding if self.hps_ms.model.vol_embedding is not None else False
-            self.speech_encoder = self.hps_ms.model.speech_encoder if self.hps_ms.model.speech_encoder is not None else 'vec768l12'
+    def unload_model(self):
+        self.svc_object.unload_model()
 
-        self.nsf_hifigan_enhance = nsf_hifigan_enhance
-        if self.shallow_diffusion or self.only_diffusion:
-            if os.path.exists(diffusion_model_path) and os.path.exists(diffusion_model_path):
-                self.diffusion_model, self.vocoder, self.diffusion_args = load_model_vocoder(
-                    diffusion_model_path, self.dev, config_path=diffusion_config_path)
-                if self.only_diffusion:
-                    self.target_sample = self.diffusion_args.data.sampling_rate
-                    self.hop_size = self.diffusion_args.data.block_size
-                    self.spk2id = self.diffusion_args.spk
-                    self.dtype = torch.float32
-                    self.speech_encoder = self.diffusion_args.data.encoder
-                    self.unit_interpolate_mode = self.diffusion_args.data.unit_interpolate_mode if self.diffusion_args.data.unit_interpolate_mode is not None else 'left'
-                if spk_mix_enable:
-                    self.diffusion_model.init_spkmix(len(self.spk2id))
-            else:
-                print("No diffusion model or config found. Shallow diffusion mode will False")
-                self.shallow_diffusion = self.only_diffusion = False
+class Svc(object):
+    def __init__(self, net_g_path,
+                 config,
+                 cluster_model_path=None,
+                 spk_mix_enable=False,
+                 feature_retrieval=False,
+                pad_seconds=0.5,
+                clip_seconds=0,
+                lg_num=0,
+                lgr_num=0.75,
+                 device="cpu",
+                 ):
+        self.device = device
+
+        self.pad_seconds = pad_seconds
+        self.clip_seconds = clip_seconds
+        self.lg_num = lg_num
+        self.lgr_num = lgr_num
+
+        self.net_g_path = net_g_path
+        self.feature_retrieval = feature_retrieval
+        self.net_g_ms = None
+        self.hps_ms = config
+        self.target_sample = self.hps_ms.data.sampling_rate
+        self.hop_size = self.hps_ms.data.hop_length
+        self.spk2id = self.hps_ms.spk
+        self.unit_interpolate_mode = self.hps_ms.data.unit_interpolate_mode if self.hps_ms.data.unit_interpolate_mode is not None else 'left'
+        self.vol_embedding = self.hps_ms.model.vol_embedding if self.hps_ms.model.vol_embedding is not None else False
+        self.speech_encoder = self.hps_ms.model.speech_encoder if self.hps_ms.model.speech_encoder is not None else 'vec768l12'
+
+        # real-time
+        self.last_chunk = None
+        self.last_o = None
+        self.chunk_len = 16000  # chunk length
+        self.pre_len = 3840  # cross fade length, multiples of 640
+
+        # if self.shallow_diffusion or self.only_diffusion:
+        #     if os.path.exists(diffusion_model_path) and os.path.exists(diffusion_model_path):
+        #         self.diffusion_model, self.vocoder, self.diffusion_args = load_model_vocoder(
+        #             diffusion_model_path, self.device, config_path=diffusion_config_path)
+        #         if self.only_diffusion:
+        #             self.target_sample = self.diffusion_args.data.sampling_rate
+        #             self.hop_size = self.diffusion_args.data.block_size
+        #             self.spk2id = self.diffusion_args.spk
+        #             self.dtype = torch.float32
+        #             self.speech_encoder = self.diffusion_args.data.encoder
+        #             self.unit_interpolate_mode = self.diffusion_args.data.unit_interpolate_mode if self.diffusion_args.data.unit_interpolate_mode is not None else 'left'
+        #         if spk_mix_enable:
+        #             self.diffusion_model.init_spkmix(len(self.spk2id))
+        #     else:
+        #         print("No diffusion model or config found. Shallow diffusion mode will False")
+        #         self.shallow_diffusion = self.only_diffusion = False
 
         # load hubert and model
-        if not self.only_diffusion:
-            self.load_model(spk_mix_enable)
-            self.volume_extractor = utils.Volume_Extractor(self.hop_size)
-        else:
-            self.volume_extractor = utils.Volume_Extractor(self.diffusion_args.data.block_size)
+        self.load_model(spk_mix_enable)
+        self.volume_extractor = utils.Volume_Extractor(self.hop_size)
+        # self.volume_extractor = utils.Volume_Extractor(self.diffusion_args.data.block_size)
 
-        if cluster_model_path is not None and os.path.exists(cluster_model_path):
-            if self.feature_retrieval:
-                with open(cluster_model_path, "rb") as f:
-                    self.cluster_model = pickle.load(f)
-                self.big_npy = None
-                self.now_spk_id = -1
-            else:
-                self.cluster_model = cluster.get_cluster_model(cluster_model_path)
-        else:
-            self.feature_retrieval = False
+        # if self.shallow_diffusion:
+        #     self.nsf_hifigan_enhance = False
+        # if self.nsf_hifigan_enhance:
+        #     from modules.enhancer import Enhancer
+        #     self.enhancer = Enhancer('nsf-hifigan', 'pretrain/nsf_hifigan/model', device=self.device)
 
-        if self.shallow_diffusion:
-            self.nsf_hifigan_enhance = False
-        if self.nsf_hifigan_enhance:
-            from modules.enhancer import Enhancer
-            self.enhancer = Enhancer('nsf-hifigan', 'pretrain/nsf_hifigan/model', device=self.dev)
+    def initialize(self, speech_encoder_manager, f0_manager, post_processor_manager):
+        self.load_speech_encoder(speech_encoder_manager)
+        self.load_f0_predictor(f0_manager)
+        self.load_post_processor(post_processor_manager)
 
-    def load_speech_encoder(self, speech_encoder):
-        self.hubert_model = speech_encoder
+    def load_speech_encoder(self, speech_encoder_manager: SpeechEncoderManager):
+        assert speech_encoder_manager.speech_encoder == self.speech_encoder
+        self.speech_encoder_manager = speech_encoder_manager
 
-    def load_f0_predictor(self, f0_predictor):
-        self.f0_predictor_object = f0_predictor
+    def load_f0_predictor(self, f0_predictor_manager: f0Manager):
+        self.f0_predictor = f0_predictor_manager.f0_predictor
+        self.f0_manager = f0_predictor_manager
+
+    def load_post_processor(self, post_processor_manager: PostProcessingManager):
+        self.post_processor = post_processor_manager
+        self.post_processor_manager = post_processor_manager
 
     def load_model(self, spk_mix_enable=False):
         # get model configuration
@@ -223,80 +245,59 @@ class Svc(object):
         _ = utils.load_checkpoint(self.net_g_path, self.net_g_ms, None)
         self.dtype = list(self.net_g_ms.parameters())[0].dtype
         if "half" in self.net_g_path and torch.cuda.is_available():
-            _ = self.net_g_ms.half().eval().to(self.dev)
+            _ = self.net_g_ms.half().eval().to(self.device)
         else:
-            _ = self.net_g_ms.eval().to(self.dev)
+            _ = self.net_g_ms.eval().to(self.device)
         if spk_mix_enable:
-            self.net_g_ms.EnableCharacterMix(len(self.spk2id), self.dev)
+            self.net_g_ms.EnableCharacterMix(len(self.spk2id), self.device)
 
-    def get_unit_f0(self, wav, tran, cluster_infer_ratio, speaker, f0_filter, f0_predictor, cr_threshold=0.05):
+    def get_unit_f0(self, wav, speaker):
+        assert self.f0_manager is not None and self.speech_encoder_manager is not None
+        f0, uv = self.f0_manager.compute_f0_uv_tran(wav)
 
-        if not hasattr(self,
-                       "f0_predictor_object") or self.f0_predictor_object is None or f0_predictor != self.f0_predictor_object.name:
-            self.f0_predictor_object = utils.get_f0_predictor(f0_predictor, hop_length=self.hop_size,
-                                                              sampling_rate=self.target_sample, device=self.dev,
-                                                              threshold=cr_threshold)
-        f0, uv = self.f0_predictor_object.compute_f0_uv(wav)
-
-        if f0_filter and sum(f0) == 0:
-            raise F0FilterException("No voice detected")
-        f0 = torch.FloatTensor(f0).to(self.dev)
-        uv = torch.FloatTensor(uv).to(self.dev)
-
-        f0 = f0 * 2 ** (tran / 12)
-        f0 = f0.unsqueeze(0)
-        uv = uv.unsqueeze(0)
-
-        wav = torch.from_numpy(wav).to(self.dev)
+        wav = torch.from_numpy(wav).to(self.device)
         if not hasattr(self, "audio16k_resample_transform"):
             self.audio16k_resample_transform = torchaudio.transforms.Resample(self.target_sample, 16000).to(
-                self.dev)
+                self.device)
         wav16k = self.audio16k_resample_transform(wav[None, :])[0]
 
-        c = self.hubert_model.encoder(wav16k)
+        # speech_encoder model gets 16khz wav and returns the embedding
+        # the embedding is interpolated to match the f0 length <- f0 length is important
+        c = self.speech_encoder_manager.encode(wav16k, speaker)
         c = utils.repeat_expand_2d(c.squeeze(0), f0.shape[1], self.unit_interpolate_mode)
-
-        if cluster_infer_ratio != 0:
-            if self.feature_retrieval:
-                speaker_id = self.spk2id.get(speaker)
-                if not speaker_id and type(speaker) is int:
-                    if len(self.spk2id.__dict__) >= speaker:
-                        speaker_id = speaker
-                if speaker_id is None:
-                    raise RuntimeError("The name you entered is not in the speaker list!")
-                feature_index = self.cluster_model[speaker_id]
-                feat_np = np.ascontiguousarray(c.transpose(0, 1).cpu().numpy())
-                if self.big_npy is None or self.now_spk_id != speaker_id:
-                    self.big_npy = feature_index.reconstruct_n(0, feature_index.ntotal)
-                    self.now_spk_id = speaker_id
-                print("starting feature retrieval...")
-                score, ix = feature_index.search(feat_np, k=8)
-                weight = np.square(1 / score)
-                weight /= weight.sum(axis=1, keepdims=True)
-                npy = np.sum(self.big_npy[ix] * np.expand_dims(weight, axis=2), axis=1)
-                c = cluster_infer_ratio * npy + (1 - cluster_infer_ratio) * feat_np
-                c = torch.FloatTensor(c).to(self.dev).transpose(0, 1)
-                print("end feature retrieval...")
-            else:
-                cluster_c = cluster.get_cluster_center_result(self.cluster_model, c.cpu().numpy().T, speaker).T
-                cluster_c = torch.FloatTensor(cluster_c).to(self.dev)
-                c = cluster_infer_ratio * cluster_c + (1 - cluster_infer_ratio) * c
 
         c = c.unsqueeze(0)
         return c, f0, uv
+
+    def extract_f0(self, wav, sr, use_chunks=False, chunk_seconds=3.0):
+        assert self.f0_predictor_object is not None
+        if use_chunks:
+            f0 = self.extract_f0_chunks(wav, sr, chunk_seconds)
+        else:
+            f0 = self.extract_f0_full(wav, sr)
+        return f0
+
+    def extract_f0_full(self, wav):
+        f0, _ = self.f0_manager.compute_f0_uv(wav)
+        return f0
+
+    def extract_f0_chunks(self, wav, sr, chunk_seconds=0.5):
+        # 청크 단위로 f0 추출
+        chunk_size = int(chunk_seconds * sr)
+        chunks = [wav[i:i + chunk_size] for i in range(0, len(wav), chunk_size)]
+        f0_chunks = []
+        for chunk in chunks:
+            f0_chunk, _ = self.f0_manager.compute_f0_uv(chunk)
+            f0_chunks.append(f0_chunk)
+        return np.concatenate(f0_chunks)
 
     def infer(self, speaker, tran, raw_path,
               cluster_infer_ratio=0,
               auto_predict_f0=False,
               noice_scale=0.4,
               f0_filter=False,
-              f0_predictor='pm',
-              enhancer_adaptive_key=0,
-              cr_threshold=0.05,
-              k_step=100,
               frame=0,
               spk_mix=False,
-              second_encoding=False,
               loudness_envelope_adjustment=1
               ):
         torchaudio.set_audio_backend("soundfile")
@@ -305,7 +306,7 @@ class Svc(object):
             self.audio_resample_transform = torchaudio.transforms.Resample(sr, self.target_sample)
         wav = self.audio_resample_transform(wav).numpy()[0]
         if spk_mix:
-            c, f0, uv = self.get_unit_f0(wav, tran, 0, None, f0_filter, f0_predictor, cr_threshold=cr_threshold)
+            c, f0, uv = self.get_unit_f0(wav, tran, 0, None, f0_filter)
             n_frames = f0.size(1)
             sid = speaker[:, frame:frame + n_frames].transpose(0, 1)
         else:
@@ -315,62 +316,66 @@ class Svc(object):
                     speaker_id = speaker
             if speaker_id is None:
                 raise RuntimeError("The name you entered is not in the speaker list!")
-            sid = torch.LongTensor([int(speaker_id)]).to(self.dev).unsqueeze(0)
-            c, f0, uv = self.get_unit_f0(wav, tran, cluster_infer_ratio, speaker, f0_filter, f0_predictor,
-                                         cr_threshold=cr_threshold)
+            sid = torch.LongTensor([int(speaker_id)]).to(self.device).unsqueeze(0)
+            c, f0, uv = self.get_unit_f0(wav, tran, cluster_infer_ratio, speaker, f0_filter)
             n_frames = f0.size(1)
         c = c.to(self.dtype)
         f0 = f0.to(self.dtype)
         uv = uv.to(self.dtype)
         with torch.no_grad():
             start = time.time()
-            vol = None
-            if not self.only_diffusion:
-                vol = self.volume_extractor.extract(torch.FloatTensor(wav).to(self.dev)[None, :])[None, :].to(
-                    self.dev) if self.vol_embedding else None
-                audio, f0 = self.net_g_ms.infer(c, f0=f0, g=sid, uv=uv, predict_f0=auto_predict_f0,
-                                                noice_scale=noice_scale, vol=vol)
-                audio = audio[0, 0].data.float()
-                audio_mel = self.vocoder.extract(audio[None, :],
-                                                 self.target_sample) if self.shallow_diffusion else None
-            else:
-                audio = torch.FloatTensor(wav).to(self.dev)
-                audio_mel = None
+            vol = self.volume_extractor.extract(torch.FloatTensor(wav).to(self.device)[None, :])[None, :].to(
+                self.device) if self.vol_embedding else None
+            audio, f0 = self.net_g_ms.infer(c, f0=f0, g=sid, uv=uv, predict_f0=auto_predict_f0,
+                                            noice_scale=noice_scale, vol=vol)
+            audio = audio[0, 0].data.float()
             if self.dtype != torch.float32:
                 c = c.to(torch.float32)
                 f0 = f0.to(torch.float32)
                 uv = uv.to(torch.float32)
-            if self.only_diffusion or self.shallow_diffusion:
-                vol = self.volume_extractor.extract(audio[None, :])[None, :, None].to(
-                    self.dev) if vol is None else vol[:, :, None]
-                if self.shallow_diffusion and second_encoding:
-                    if not hasattr(self, "audio16k_resample_transform"):
-                        self.audio16k_resample_transform = torchaudio.transforms.Resample(self.target_sample,
-                                                                                          16000).to(self.dev)
-                    audio16k = self.audio16k_resample_transform(audio[None, :])[0]
-                    c = self.hubert_model.encoder(audio16k)
-                    c = utils.repeat_expand_2d(c.squeeze(0), f0.shape[1], self.unit_interpolate_mode)
-                f0 = f0[:, :, None]
-                c = c.transpose(-1, -2)
-                audio_mel = self.diffusion_model(
-                    c,
-                    f0,
-                    vol,
-                    spk_id=sid,
-                    spk_mix_dict=None,
-                    gt_spec=audio_mel,
-                    infer=True,
-                    infer_speedup=self.diffusion_args.infer.speedup,
-                    method=self.diffusion_args.infer.method,
-                    k_step=k_step)
-                audio = self.vocoder.infer(audio_mel, f0).squeeze()
-            if self.nsf_hifigan_enhance:
-                audio, _ = self.enhancer.enhance(
-                    audio[None, :],
+            # audio_mel = self.vocoder.extract(audio[None, :],
+            #                                  self.target_sample) if self.shallow_diffusion else None
+            # if self.only_diffusion or self.shallow_diffusion:
+            #     vol = self.volume_extractor.extract(audio[None, :])[None, :, None].to(
+            #         self.device) if vol is None else vol[:, :, None]
+            #     if self.shallow_diffusion and second_encoding:
+            #         if not hasattr(self, "audio16k_resample_transform"):
+            #             self.audio16k_resample_transform = torchaudio.transforms.Resample(self.target_sample,
+            #                                                                               16000).to(self.device)
+            #         audio16k = self.audio16k_resample_transform(audio[None, :])[0]
+            #         c = self.hubert_model.encoder(audio16k)
+            #         c = utils.repeat_expand_2d(c.squeeze(0), f0.shape[1], self.unit_interpolate_mode)
+            #     f0 = f0[:, :, None]
+            #     c = c.transpose(-1, -2)
+            #     audio_mel = self.diffusion_model(
+            #         c,
+            #         f0,
+            #         vol,
+            #         spk_id=sid,
+            #         spk_mix_dict=None,
+            #         gt_spec=audio_mel,
+            #         infer=True,
+            #         infer_speedup=self.diffusion_args.infer.speedup,
+            #         method=self.diffusion_args.infer.method,
+            #         k_step=k_step)
+            #     audio = self.vocoder.infer(audio_mel, f0).squeeze()
+            # if self.nsf_hifigan_enhance:
+            #     audio, _ = self.enhancer.enhance(
+            #         audio[None, :],
+            #         self.target_sample,
+            #         f0[:, :, None],
+            #         self.hps_ms.data.hop_length,
+            #         adaptive_key=enhancer_adaptive_key)
+
+            if self.post_processor is not None:
+                audio = self.post_processor.process(
+                    audio,
                     self.target_sample,
-                    f0[:, :, None],
-                    self.hps_ms.data.hop_length,
-                    adaptive_key=enhancer_adaptive_key)
+                    c, f0, vol,
+                    self.hop_size,
+                    spk_id=sid,
+                )
+
             if loudness_envelope_adjustment != 1:
                 audio = utils.change_rms(wav, self.target_sample, audio, self.target_sample,
                                          loudness_envelope_adjustment)
@@ -386,10 +391,6 @@ class Svc(object):
         # unload model
         self.net_g_ms = self.net_g_ms.to("cpu")
         del self.net_g_ms
-        if hasattr(self, "enhancer"):
-            self.enhancer.enhancer = self.enhancer.enhancer.to("cpu")
-            del self.enhancer.enhancer
-            del self.enhancer
         gc.collect()
 
     def slice_inference(self,
@@ -400,16 +401,7 @@ class Svc(object):
                         cluster_infer_ratio,
                         auto_predict_f0,
                         noice_scale,
-                        pad_seconds=0.5,
-                        clip_seconds=0,
-                        lg_num=0,
-                        lgr_num=0.75,
-                        f0_predictor='pm',
-                        enhancer_adaptive_key=0,
-                        cr_threshold=0.05,
-                        k_step=100,
                         use_spk_mix=False,
-                        second_encoding=False,
                         loudness_envelope_adjustment=1
                         ):
         if use_spk_mix:
@@ -419,9 +411,9 @@ class Svc(object):
         wav_path = Path(raw_audio_path).with_suffix('.wav')
         chunks = slicer.cut(wav_path, db_thresh=slice_db)
         audio_data, audio_sr = slicer.chunks2audio(wav_path, chunks)
-        per_size = int(clip_seconds * audio_sr)
-        lg_size = int(lg_num * audio_sr)
-        lg_size_r = int(lg_size * lgr_num)
+        per_size = int(self.clip_seconds * audio_sr)
+        lg_size = int(self.lg_num * audio_sr)
+        lg_size_r = int(lg_size * self.lgr_num)
         lg_size_c_l = (lg_size - lg_size_r) // 2
         lg_size_c_r = lg_size - lg_size_r - lg_size_c_l
         lg = np.linspace(0, 1, lg_size_r) if lg_size != 0 else 0
@@ -439,12 +431,12 @@ class Svc(object):
                 else:
                     datas = [data]
                 for k, dat in enumerate(datas):
-                    pad_len = int(audio_sr * pad_seconds)
+                    pad_len = int(audio_sr * self.pad_seconds)
                     per_length = int(np.ceil(len(dat) / audio_sr * self.target_sample))
                     a_length = per_length + 2 * pad_len
                     audio_length += a_length // self.hop_size
             audio_length += len(audio_data)
-            spk_mix_tensor = torch.zeros(size=(len(spk), audio_length)).to(self.dev)
+            spk_mix_tensor = torch.zeros(size=(len(spk), audio_length)).to(self.device)
             for i in range(len(spk)):
                 last_end = None
                 for mix in spk[i]:
@@ -461,16 +453,16 @@ class Svc(object):
                             raise RuntimeError("[i]EndTime Must Equal [i+1]BeginTime!")
                     last_end = end
                     if step == 0.:
-                        spk_mix_data = torch.zeros(length).to(self.dev) + mix[2]
+                        spk_mix_data = torch.zeros(length).to(self.device) + mix[2]
                     else:
-                        spk_mix_data = torch.arange(mix[2], mix[3], step).to(self.dev)
+                        spk_mix_data = torch.arange(mix[2], mix[3], step).to(self.device)
                     if (len(spk_mix_data) < length):
                         num_pad = length - len(spk_mix_data)
                         spk_mix_data = torch.nn.functional.pad(spk_mix_data, [0, num_pad], mode="reflect").to(
-                            self.dev)
+                            self.device)
                     spk_mix_tensor[i][begin:end] = spk_mix_data[:length]
 
-            spk_mix_ten = torch.sum(spk_mix_tensor, dim=0).unsqueeze(0).to(self.dev)
+            spk_mix_ten = torch.sum(spk_mix_tensor, dim=0).unsqueeze(0).to(self.device)
             # spk_mix_tensor[0][spk_mix_ten<0.001] = 1.0
             for i, x in enumerate(spk_mix_ten[0]):
                 if x == 0.0:
@@ -499,11 +491,11 @@ class Svc(object):
                 datas = [data]
             for k, dat in enumerate(datas):
                 per_length = int(
-                    np.ceil(len(dat) / audio_sr * self.target_sample)) if clip_seconds != 0 else length
-                if clip_seconds != 0:
+                    np.ceil(len(dat) / audio_sr * self.target_sample)) if self.clip_seconds != 0 else length
+                if self.clip_seconds != 0:
                     print(f'###=====segment clip start, {round(len(dat) / audio_sr, 3)}s======')
                 # padd
-                pad_len = int(audio_sr * pad_seconds)
+                pad_len = int(audio_sr * self.pad_seconds)
                 dat = np.concatenate([np.zeros([pad_len]), dat, np.zeros([pad_len])])
                 raw_path = io.BytesIO()
                 soundfile.write(raw_path, dat, audio_sr, format="wav")
@@ -512,40 +504,130 @@ class Svc(object):
                                                           cluster_infer_ratio=cluster_infer_ratio,
                                                           auto_predict_f0=auto_predict_f0,
                                                           noice_scale=noice_scale,
-                                                          f0_predictor=f0_predictor,
-                                                          enhancer_adaptive_key=enhancer_adaptive_key,
-                                                          cr_threshold=cr_threshold,
-                                                          k_step=k_step,
                                                           frame=global_frame,
                                                           spk_mix=use_spk_mix,
-                                                          second_encoding=second_encoding,
                                                           loudness_envelope_adjustment=loudness_envelope_adjustment
                                                           )
                 global_frame += out_frame
                 _audio = out_audio.cpu().numpy()
-                pad_len = int(self.target_sample * pad_seconds)
+                pad_len = int(self.target_sample * self.pad_seconds)
                 _audio = _audio[pad_len:-pad_len]
                 _audio = pad_array(_audio, per_length)
                 if lg_size != 0 and k != 0:
-                    lg1 = audio[-(lg_size_r + lg_size_c_r):-lg_size_c_r] if lgr_num != 1 else audio[-lg_size:]
-                    lg2 = _audio[lg_size_c_l:lg_size_c_l + lg_size_r] if lgr_num != 1 else _audio[0:lg_size]
+                    lg1 = audio[-(lg_size_r + lg_size_c_r):-lg_size_c_r] if self.lgr_num != 1 else audio[-lg_size:]
+                    lg2 = _audio[lg_size_c_l:lg_size_c_l + lg_size_r] if self.lgr_num != 1 else _audio[0:lg_size]
                     lg_pre = lg1 * (1 - lg) + lg2 * lg
-                    audio = audio[0:-(lg_size_r + lg_size_c_r)] if lgr_num != 1 else audio[0:-lg_size]
+                    audio = audio[0:-(lg_size_r + lg_size_c_r)] if self.lgr_num != 1 else audio[0:-lg_size]
                     audio.extend(lg_pre)
-                    _audio = _audio[lg_size_c_l + lg_size_r:] if lgr_num != 1 else _audio[lg_size:]
+                    _audio = _audio[lg_size_c_l + lg_size_r:] if self.lgr_num != 1 else _audio[lg_size:]
                 audio.extend(list(_audio))
         return np.array(audio)
 
-class RealTimeVC:
-    def __init__(self):
-        self.last_chunk = None
-        self.last_o = None
-        self.chunk_len = 16000  # chunk length
-        self.pre_len = 3840  # cross fade length, multiples of 640
+    def slice_inference_with_f0(self, raw_audio_path, f0, spk, tran, slice_db, cluster_infer_ratio,
+                                auto_predict_f0, noise_scale, pad_seconds=0.5):
+        wav_path = Path(raw_audio_path).with_suffix('.wav')
+        chunks = slicer.cut(wav_path, db_thresh=slice_db)
+        audio_data, audio_sr = slicer.chunks2audio(wav_path, chunks)
 
-    # Input and output are 1-dimensional numpy waveform arrays
+        per_size = int(self.clip_seconds * audio_sr)
+        lg_size = int(self.lg_num * audio_sr)
+        lg_size_r = int(lg_size * self.lgr_num)
+        lg_size_c_l = (lg_size - lg_size_r) // 2
+        lg_size_c_r = lg_size - lg_size_r - lg_size_c_l
+        lg = np.linspace(0, 1, lg_size_r) if lg_size != 0 else 0
 
-    def process(self, svc_model, speaker_id, f_pitch_change, input_wav_path,
+        audio = []
+        f0_output = []
+        f0_index = 0
+
+        for (slice_tag, data) in audio_data:
+            print(f'#=====segment start, {round(len(data) / audio_sr, 3)}s======')
+
+            if slice_tag:
+                print('jump empty segment')
+                _audio = np.zeros(len(data))
+                audio.extend(list(_audio))
+                f0_output.extend([0] * (len(data) // self.hop_size))
+                continue
+
+            # 현재 청크의 f0 계산
+            f0_chunk = f0[f0_index:f0_index + len(data) // self.hop_size]
+            f0_index += len(data) // self.hop_size
+
+            # clip_seconds에 따라 청크 나누기
+            datas = split_list_by_n(data, per_size, lg_size)
+            f0_chunks = split_list_by_n(f0_chunk, per_size // self.hop_size, lg_size // self.hop_size)
+
+            for k, (dat, f0_dat) in enumerate(zip(datas, f0_chunks)):
+                print(f'----->segment clip start, {round(len(dat) / audio_sr, 3)}s======')
+                pad_len = int(audio_sr * pad_seconds)
+                dat = np.concatenate([np.zeros([pad_len]), dat, np.zeros([pad_len])])
+                f0_dat = np.concatenate(
+                    [np.zeros(pad_len // self.hop_size), f0_dat, np.zeros(pad_len // self.hop_size)])
+
+                # 추론을 위한 임시 파일 생성
+                raw_path = io.BytesIO()
+                soundfile.write(raw_path, dat, audio_sr, format="wav")
+                raw_path.seek(0)
+
+                # 수정된 f0를 사용하여 추론
+                out_audio, out_sr, out_f0 = self.infer_with_f0(
+                    spk, tran, raw_path, f0_dat,
+                    cluster_infer_ratio=cluster_infer_ratio,
+                    auto_predict_f0=auto_predict_f0,
+                    noise_scale=noise_scale
+                )
+
+                out_audio = out_audio.cpu().numpy()
+
+                # 패딩 제거
+                out_audio = out_audio[pad_len:-pad_len]
+                out_f0 = out_f0[pad_len // self.hop_size: -(pad_len // self.hop_size)]
+
+                # crossfade 적용
+                if k != 0:
+                    out_audio[:lg_size_r] = out_audio[:lg_size_r] * lg + audio[-lg_size_r:] * (1 - lg)
+                    out_f0[:lg_size_r // self.hop_size] = out_f0[:lg_size_r // self.hop_size] * lg[
+                                                                                                :lg_size_r // self.hop_size] + f0_output[
+                                                                                                                               -lg_size_r // self.hop_size:] * (
+                                                                      1 - lg[:lg_size_r // self.hop_size])
+                    audio = audio[:-lg_size_r]
+                    f0_output = f0_output[:-lg_size_r // self.hop_size]
+
+                audio.extend(list(out_audio))
+                f0_output.extend(list(out_f0))
+
+        return np.array(audio), np.array(f0_output)
+
+    def infer_with_f0(self, speaker, tran, raw_path, f0, cluster_infer_ratio=0, auto_predict_f0=False, noise_scale=0.4):
+        # infer 메소드와 유사하지만 f0를 직접 받아 사용
+        wav, sr = torchaudio.load(raw_path)
+        wav = self.audio_resample_transform(wav).numpy()[0]
+
+        c, _, uv = self.get_unit_f0(wav, tran, cluster_infer_ratio, speaker, False)
+
+        # 제공된 f0 사용
+        f0 = torch.FloatTensor(f0).unsqueeze(0).to(self.device)
+
+        c = c.to(self.dtype)
+        f0 = f0.to(self.dtype)
+        uv = uv.to(self.dtype)
+
+        with torch.no_grad():
+            sid = torch.LongTensor([self.spk2id[speaker]]).to(self.device).unsqueeze(0)
+            audio = self.net_g_ms.infer(c, f0=f0, g=sid, uv=uv, predict_f0=auto_predict_f0, noise_scale=noise_scale)[0][
+                0].data.float()
+
+            if self.post_processor is not None:
+                vol = self.volume_extractor.extract(audio.unsqueeze(0))[0]
+                audio = self.post_processor.process(
+                    audio, self.target_sample, c, f0, vol,
+                    self.hop_size, spk_id=sid
+                )
+
+        return audio, self.target_sample, f0.shape[1]
+
+    def realtime_infer(self, speaker_id, f_pitch_change, input_wav_path,
                 cluster_infer_ratio=0,
                 auto_predict_f0=False,
                 noice_scale=0.4,
@@ -558,7 +640,7 @@ class RealTimeVC:
         if self.last_chunk is None:
             input_wav_path.seek(0)
 
-            audio, sr = svc_model.infer(speaker_id, f_pitch_change, input_wav_path,
+            audio, sr, _ = self.infer(speaker_id, f_pitch_change, input_wav_path,
                                         cluster_infer_ratio=cluster_infer_ratio,
                                         auto_predict_f0=auto_predict_f0,
                                         noice_scale=noice_scale,
@@ -573,7 +655,7 @@ class RealTimeVC:
             soundfile.write(temp_wav, audio, sr, format="wav")
             temp_wav.seek(0)
 
-            audio, sr = svc_model.infer(speaker_id, f_pitch_change, temp_wav,
+            audio, sr, _ = self.infer(speaker_id, f_pitch_change, temp_wav,
                                         cluster_infer_ratio=cluster_infer_ratio,
                                         auto_predict_f0=auto_predict_f0,
                                         noice_scale=noice_scale,
@@ -584,5 +666,4 @@ class RealTimeVC:
             self.last_chunk = audio[-self.pre_len:]
             self.last_o = audio
             return ret[self.chunk_len:2 * self.chunk_len]
-
 

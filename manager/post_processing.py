@@ -1,6 +1,6 @@
 
 
-class PostProcessing():
+class PostProcessingManager():
     def __init__(self):
         self.post_processing_modes = ["NSF-HifiGAN", "shallow_diffusion"]
 

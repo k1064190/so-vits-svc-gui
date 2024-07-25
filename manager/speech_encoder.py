@@ -1,3 +1,6 @@
+import os
+import pickle
+
 import torch
 import torchaudio
 import numpy as np
@@ -26,7 +29,7 @@ class SpeechEncoderManager:
 
     def initialize(self, speech_encoder: str, cluster_infer_ratio: float = 0,
                    feature_retrieval: bool = False, spk2id: dict = {},
-                   cluster_model: Any = None, target_sample: int = 16000,
+                   cluster_model_path: str = None, target_sample: int = 16000,
                    unit_interpolate_mode: str = 'left', device="cpu", **kwargs):
         """
         Initialize the speech encoder and set various parameters.
@@ -36,7 +39,7 @@ class SpeechEncoderManager:
             cluster_infer_ratio (float): Ratio for cluster inference.
             feature_retrieval (bool): Whether to use feature retrieval.
             spk2id (dict): Mapping of speaker names to IDs.
-            cluster_model (Any): Cluster model for feature retrieval.
+            cluster_model_path (str): Cluster model for feature retrieval.
             target_sample (int): Target sample rate.
             unit_interpolate_mode (str): Interpolation mode for units.
             **kwargs: Additional arguments for the speech encoder.
@@ -46,13 +49,23 @@ class SpeechEncoderManager:
         # if not, load the speech encoder only if the speech encoder is different
 
         self.device = device
+
         if self.speech_encoder is None or self.speech_encoder != speech_encoder:
             self.speech_encoder = speech_encoder
             self.speech_encoder_object = self.get_speech_encoder(self.speech_encoder, self.device, **kwargs)
         self.cluster_infer_ratio = cluster_infer_ratio
         self.feature_retrieval = feature_retrieval
         self.spk2id = spk2id
-        self.cluster_model = cluster_model
+        if cluster_model_path is not None and os.path.exists(cluster_model_path):
+            if self.feature_retrieval:
+                with open(cluster_model_path, "rb") as f:
+                    self.cluster_model = pickle.load(f)
+                self.big_npy = None
+                self.now_spk_id = -1
+            else:
+                self.cluster_model = cluster.get_cluster_model(cluster_model_path)
+        else:
+            self.cluster_model = None
         self.target_sample = target_sample
         self.unit_interpolate_mode = unit_interpolate_mode
         self.audio16k_resample_transform = torchaudio.transforms.Resample(target_sample, 16000).to(self.device)
@@ -101,12 +114,12 @@ class SpeechEncoderManager:
             raise Exception(f"Unsupported speech encoder: {speech_encoder}, available: {self.speech_encoder_modes}")
         return speech_encoder_object
 
-    def encode(self, wav: np.ndarray, speaker: Optional[str] = None) -> torch.Tensor:
+    def encode(self, wav16k: np.ndarray, speaker: Optional[str] = None) -> torch.Tensor:
         """
         Encode the input audio and apply cluster inference if enabled.
 
         Args:
-            wav (np.ndarray): Input audio waveform.
+            wav16k (np.ndarray): Input audio waveform at 16 kHz.
             speaker (Optional[str]): Speaker identifier for cluster inference.
 
         Returns:
@@ -115,21 +128,17 @@ class SpeechEncoderManager:
         if self.speech_encoder_object is None:
             raise Exception("Speech encoder not initialized. Call initialize() first.")
 
-        # Convert wav to tensor and resample to 16kHz
-        wav_tensor = torch.from_numpy(wav).float().to(self.device)
-        wav16k = self.audio16k_resample_transform(wav_tensor.unsqueeze(0))[0]
-
         # Encode the audio
         c = self.speech_encoder_object.encode(wav16k)
 
         # Apply cluster inference if enabled
-        if self.cluster_infer_ratio != 0:
+        if self.cluster_infer_ratio != 0 and self.cluster_model is not None:
             if self.feature_retrieval:
                 c = self._apply_feature_retrieval(c, speaker)
             else:
                 c = self._apply_cluster_inference(c, speaker)
 
-        return c.unsqueeze(0)
+        return c
 
     def _apply_feature_retrieval(self, c: torch.Tensor, speaker: str) -> torch.Tensor:
         """Apply feature retrieval for cluster inference."""

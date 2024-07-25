@@ -23,7 +23,7 @@ class f0Manager:
         self.f0_predictor = None
         self.f0_predictor_object = None
 
-    def initialize(self, f0_predictor, hop_size=512, target_sample=44100, device="cpu", cr_threshold=0.05):
+    def initialize(self, f0_predictor, hop_size=512, target_sample=44100, device="cpu", cr_threshold=0.05, trans=0.0):
         '''
 
         Args:
@@ -39,8 +39,8 @@ class f0Manager:
 
         self.hop_size = hop_size
         self.target_sample = target_sample
-        self.device = device
         self.cr_threshold = cr_threshold
+        self.trans = trans
         # if the arguments are different, reinitialize the f0_predictor
         if f0_predictor is None or self.f0_predictor != f0_predictor or \
                 self.hop_size != hop_size or self.target_sample != target_sample or self.device != device or \
@@ -74,15 +74,19 @@ class f0Manager:
             raise Exception(f"Unsupported f0 predictor: {f0_predictor}, available: {self.f0_modes}")
         return f0_predictor_object
 
-    def get_f0(self, wav, tran):
+    def compute_f0_uv_tran(self, wav):
         f0, uv = self.f0_predictor_object.compute_f0_uv(wav)
 
         f0 = torch.FloatTensor(f0).to(self.device)
         uv = torch.FloatTensor(uv).to(self.device)
 
-        f0 = f0 * 2 ** (tran / 12)
+        f0 = f0 * 2 ** (self.trans / 12)
         f0 = f0.unsqueeze(0)
         uv = uv.unsqueeze(0)
+        return f0, uv
+
+    def compute_f0_uv(self, wav):
+        f0, uv = self.f0_predictor_object.compute_f0_uv(wav)
         return f0, uv
 
 
