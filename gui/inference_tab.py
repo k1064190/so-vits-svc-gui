@@ -48,11 +48,11 @@ class InferenceTab(QWidget):
             "cluster_model_path": None,
             "speaker": 0,
             "silence_threshold": 0,
+            "cr_threshold": 0,
             "pitch_shift": 0,
             "noise_scale": 0,
             "pad_seconds": 0,
             "chunk_seconds": 0,
-            "max_chunk_seconds": 0,
             "linear_gradient": 0,
             "linear_gradient_retain": 0,
             "retrieval": False,
@@ -154,10 +154,14 @@ class InferenceTab(QWidget):
         # Cluster, feature retrieval
         common_layout.addWidget(self.create_check_box("Feature Retrieval(Cluster required)", self.common_arguments, "retrieval"))
 
-        common_layout.addWidget(self.create_slider("Max chunk seconds", 40.0, 0.0, 200.0, 1, self.common_arguments, "max_chunk_seconds"))
         common_layout.addWidget(self.create_radio_button("F0 method", self.f0_modes, self.common_arguments, "f0"))
+        common_layout.addWidget(self.create_slider("CR Threshold", 0.05, 0.0, 1.0, 0.01, self.common_arguments, "cr_threshold"))
         common_layout.addWidget(self.create_check_box("Auto predict F0", self.common_arguments, "auto_predict_f0"))
-        common_layout.addWidget(self.create_check_box("Use volume", self.common_arguments, "use_volume"))
+        common_layout.addWidget(self.create_check_box("Use volume", self.common_arguments, "use_volume", default=True))
+
+        self.use_spk_mix = self.create_check_box("Use multiple speakers(Not supported Yet)", self.common_arguments, "use_spk_mix", default=False)
+        common_layout.addWidget(self.use_spk_mix)
+
 
         if self.devices:
             common_layout.addWidget(self.create_combo_box("Device",  [device[0] for device in self.devices], self.device_arguments, "device"))
@@ -189,7 +193,7 @@ class InferenceTab(QWidget):
         run_arguments_layout = QHBoxLayout(run_arguments_group)
         f0_modification_widget = self.create_button("F0 Modification", lambda: {})
         run_arguments_layout.addWidget(f0_modification_widget)
-        button = self.create_button("Run", lambda: {})
+        button = self.create_button("Run", self.run)
         run_arguments_layout.addWidget(button)
         return run_arguments_group
 
@@ -331,10 +335,15 @@ class InferenceTab(QWidget):
             else:
                 combo_box.setCurrentIndex(combo_box.findText(name_or_idx))
 
-    def create_check_box(self, label: str, arguments_dict: Optional[Dict[str, Any]] = None, var_name: Optional[str] = None) -> QWidget:
+    def create_check_box(self, label: str, arguments_dict: Optional[Dict[str, Any]] = None, var_name: Optional[str] = None, direction: int = 0, default: bool = False) -> QWidget:
         widget = QWidget()
-        layout = QVBoxLayout()
+        if direction == 0:
+            layout = QHBoxLayout()
+        else:
+            layout = QVBoxLayout()
         check_box = QCheckBox(label)
+        if default:
+            check_box.setChecked(True)
         def update() -> None:
             if arguments_dict is not None and var_name is not None:
                 arguments_dict[var_name] = check_box.isChecked()
@@ -461,10 +470,9 @@ class InferenceTab(QWidget):
         self.common_arguments["model"] = self.inference_manager.load_model(model_path, config_path, cluster_model_path)
 
     def run(self):
-        #
-
+        print(f"common: {self.common_arguments}")
         # Pass inference arguments to inference manager
-        self.inference_manager.load_model(self.common_arguments)
+        # self.inference_manager.load_model(self.common_arguments)
 
     def closeEvent(self, ev: QCloseEvent) -> None:
         ev.accept()

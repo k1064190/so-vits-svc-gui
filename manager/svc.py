@@ -127,7 +127,7 @@ class SVCManager():
         self.svc_object = None
         self.hps_ms = None
 
-    def initialize(self, svc, model_path, config, cluster_model_path, use_spk_mix, feature_retrieval,
+    def initialize(self, svc, model_path, config, threshold, use_spk_mix, feature_retrieval,
                    pad_seconds=0.5, clip_seconds=0, lg_num=0, lgr_num=0.75, device="cpu"):
         self.device = device
 
@@ -135,22 +135,26 @@ class SVCManager():
         self.clip_seconds = clip_seconds
         self.lg_num = lg_num
         self.lgr_num = lgr_num
+        self.threshold = threshold
 
         self.svc = svc
-        self.svc_object = self.get_svc(svc, model_path, config, cluster_model_path, use_spk_mix, feature_retrieval,
+        self.svc_object = self.get_svc(svc, model_path, config, threshold, use_spk_mix, feature_retrieval,
                                        pad_seconds, clip_seconds, lg_num, lgr_num, device)
         self.hps_ms = self.svc_object.hps_ms
         self.spk2id = self.svc_object.spk2id
         self.speech_encoder = self.svc_object.speech_encoder
 
 
-    def get_svc(self, svc, model_path, config, cluster_model_path, use_spk_mix, feature_retrieval,
+    def get_svc(self, svc, model_path, config, threshold, use_spk_mix, feature_retrieval,
                 pad_seconds, clip_seconds, lg_num, lgr_num, device):
         if svc == "so-vits":
-            return Svc(model_path, config, cluster_model_path, use_spk_mix, feature_retrieval,
+            return Svc(model_path, config, threshold, use_spk_mix, feature_retrieval,
                        pad_seconds, clip_seconds, lg_num, lgr_num, device)
         else:
             raise Exception(f"Unsupported svc: {svc}, available: {self.svc_modes}")
+
+    def load_components(self, f0, speech_encoder, post_processing):
+        self.svc_object.initialize(speech_encoder, f0, post_processing)
 
     def unload_model(self):
         self.svc_object.unload_model()
@@ -158,7 +162,7 @@ class SVCManager():
 class Svc(object):
     def __init__(self, net_g_path,
                  config,
-                 cluster_model_path=None,
+                 threshold=0.05,
                  spk_mix_enable=False,
                  feature_retrieval=False,
                 pad_seconds=0.5,
@@ -173,6 +177,7 @@ class Svc(object):
         self.clip_seconds = clip_seconds
         self.lg_num = lg_num
         self.lgr_num = lgr_num
+        self.slice_db = threshold
 
         self.net_g_path = net_g_path
         self.feature_retrieval = feature_retrieval
@@ -269,27 +274,27 @@ class Svc(object):
         c = c.unsqueeze(0)
         return c, f0, uv
 
-    def extract_f0(self, wav, sr, use_chunks=False, chunk_seconds=3.0):
-        assert self.f0_predictor_object is not None
-        if use_chunks:
-            f0 = self.extract_f0_chunks(wav, sr, chunk_seconds)
-        else:
-            f0 = self.extract_f0_full(wav, sr)
-        return f0
-
-    def extract_f0_full(self, wav):
-        f0, _ = self.f0_manager.compute_f0_uv(wav)
-        return f0
-
-    def extract_f0_chunks(self, wav, sr, chunk_seconds=0.5):
-        # 청크 단위로 f0 추출
-        chunk_size = int(chunk_seconds * sr)
-        chunks = [wav[i:i + chunk_size] for i in range(0, len(wav), chunk_size)]
-        f0_chunks = []
-        for chunk in chunks:
-            f0_chunk, _ = self.f0_manager.compute_f0_uv(chunk)
-            f0_chunks.append(f0_chunk)
-        return np.concatenate(f0_chunks)
+    # TODO
+    # def extract_f0(self, wav, sr, use_chunks=False, chunk_seconds=3.0):
+    #     if use_chunks:
+    #         f0 = self.extract_f0_chunks(wav, sr, chunk_seconds)
+    #     else:
+    #         f0 = self.extract_f0_full(wav, sr)
+    #     return f0
+    #
+    # def extract_f0_full(self, wav):
+    #     f0, _ = self.f0_manager.compute_f0_uv(wav)
+    #     return f0
+    #
+    # def extract_f0_chunks(self, wav, sr, chunk_seconds=0.5):
+    #     # 청크 단위로 f0 추출
+    #     chunk_size = int(chunk_seconds * sr)
+    #     chunks = [wav[i:i + chunk_size] for i in range(0, len(wav), chunk_size)]
+    #     f0_chunks = []
+    #     for chunk in chunks:
+    #         f0_chunk, _ = self.f0_manager.compute_f0_uv(chunk)
+    #         f0_chunks.append(f0_chunk)
+    #     return np.concatenate(f0_chunks)
 
     def infer(self, speaker, tran, raw_path,
               cluster_infer_ratio=0,
@@ -306,7 +311,7 @@ class Svc(object):
             self.audio_resample_transform = torchaudio.transforms.Resample(sr, self.target_sample)
         wav = self.audio_resample_transform(wav).numpy()[0]
         if spk_mix:
-            c, f0, uv = self.get_unit_f0(wav, tran, 0, None, f0_filter)
+            c, f0, uv = self.get_unit_f0(wav, None)
             n_frames = f0.size(1)
             sid = speaker[:, frame:frame + n_frames].transpose(0, 1)
         else:
@@ -317,7 +322,7 @@ class Svc(object):
             if speaker_id is None:
                 raise RuntimeError("The name you entered is not in the speaker list!")
             sid = torch.LongTensor([int(speaker_id)]).to(self.device).unsqueeze(0)
-            c, f0, uv = self.get_unit_f0(wav, tran, cluster_infer_ratio, speaker, f0_filter)
+            c, f0, uv = self.get_unit_f0(wav, speaker)
             n_frames = f0.size(1)
         c = c.to(self.dtype)
         f0 = f0.to(self.dtype)
@@ -368,6 +373,7 @@ class Svc(object):
             #         adaptive_key=enhancer_adaptive_key)
 
             if self.post_processor is not None:
+                # TODO
                 audio = self.post_processor.process(
                     audio,
                     self.target_sample,
