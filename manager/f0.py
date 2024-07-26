@@ -76,13 +76,7 @@ class f0Manager:
 
     def compute_f0_uv_tran(self, wav):
         f0, uv = self.f0_predictor_object.compute_f0_uv(wav)
-
-        f0 = torch.FloatTensor(f0).to(self.device)
-        uv = torch.FloatTensor(uv).to(self.device)
-
         f0 = f0 * 2 ** (self.trans / 12)
-        f0 = f0.unsqueeze(0)
-        uv = uv.unsqueeze(0)
         return f0, uv
 
     def compute_f0_uv(self, wav):

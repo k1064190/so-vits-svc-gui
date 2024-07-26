@@ -6,6 +6,8 @@ from modules.F0Predictor.F0Predictor import F0Predictor
 
 class CrepeF0Predictor(F0Predictor):
     def __init__(self,hop_length=512,f0_min=50,f0_max=1100,device=None,sampling_rate=44100,threshold=0.05,model="full"):
+        print("CrepeF0Predictor")
+        print(f"hop_length: {hop_length}")
         self.F0Creper = CrepePitchExtractor(hop_length=hop_length,f0_min=f0_min,f0_max=f0_max,device=device,threshold=threshold,model=model)
         self.hop_length = hop_length
         self.f0_min = f0_min

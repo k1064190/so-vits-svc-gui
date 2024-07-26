@@ -7,6 +7,7 @@ import os
 import pickle
 import time
 from pathlib import Path
+from typing import Union
 
 import librosa
 import numpy as np
@@ -118,59 +119,19 @@ def split_list_by_n(list_collection, n, pre=0):
 class F0FilterException(Exception):
     pass
 
-
-class SVCManager():
-    def __init__(self):
-        self.device = "cpu"
-        self.svc_modes = ["so-vits-4.0"]
-        self.svc = None
-        self.svc_object = None
-        self.hps_ms = None
-
-    def initialize(self, svc, model_path, config, threshold, use_spk_mix, feature_retrieval,
-                   pad_seconds=0.5, clip_seconds=0, lg_num=0, lgr_num=0.75, device="cpu"):
-        self.device = device
-
-        self.pad_seconds = pad_seconds
-        self.clip_seconds = clip_seconds
-        self.lg_num = lg_num
-        self.lgr_num = lgr_num
-        self.threshold = threshold
-
-        self.svc = svc
-        self.svc_object = self.get_svc(svc, model_path, config, threshold, use_spk_mix, feature_retrieval,
-                                       pad_seconds, clip_seconds, lg_num, lgr_num, device)
-        self.hps_ms = self.svc_object.hps_ms
-        self.spk2id = self.svc_object.spk2id
-        self.speech_encoder = self.svc_object.speech_encoder
-
-
-    def get_svc(self, svc, model_path, config, threshold, use_spk_mix, feature_retrieval,
-                pad_seconds, clip_seconds, lg_num, lgr_num, device):
-        if svc == "so-vits":
-            return Svc(model_path, config, threshold, use_spk_mix, feature_retrieval,
-                       pad_seconds, clip_seconds, lg_num, lgr_num, device)
-        else:
-            raise Exception(f"Unsupported svc: {svc}, available: {self.svc_modes}")
-
-    def load_components(self, f0, speech_encoder, post_processing):
-        self.svc_object.initialize(speech_encoder, f0, post_processing)
-
-    def unload_model(self):
-        self.svc_object.unload_model()
-
 class Svc(object):
     def __init__(self, net_g_path,
                  config,
                  threshold=0.05,
                  spk_mix_enable=False,
-                 feature_retrieval=False,
                 pad_seconds=0.5,
                 clip_seconds=0,
                 lg_num=0,
                 lgr_num=0.75,
                  device="cpu",
                  ):
+        torchaudio.set_audio_backend("soundfile")
+
         self.device = device
 
         self.pad_seconds = pad_seconds
@@ -180,7 +141,6 @@ class Svc(object):
         self.slice_db = threshold
 
         self.net_g_path = net_g_path
-        self.feature_retrieval = feature_retrieval
         self.net_g_ms = None
         self.hps_ms = config
         self.target_sample = self.hps_ms.data.sampling_rate
@@ -234,11 +194,9 @@ class Svc(object):
         self.speech_encoder_manager = speech_encoder_manager
 
     def load_f0_predictor(self, f0_predictor_manager: f0Manager):
-        self.f0_predictor = f0_predictor_manager.f0_predictor
         self.f0_manager = f0_predictor_manager
 
     def load_post_processor(self, post_processor_manager: PostProcessingManager):
-        self.post_processor = post_processor_manager
         self.post_processor_manager = post_processor_manager
 
     def load_model(self, spk_mix_enable=False):
@@ -256,9 +214,25 @@ class Svc(object):
         if spk_mix_enable:
             self.net_g_ms.EnableCharacterMix(len(self.spk2id), self.device)
 
+    def load_wav(self, raw_audio_path):
+        wav, sr = torchaudio.load(raw_audio_path)
+        if not hasattr(self, "audio_resample_transform") or self.audio16k_resample_transform.orig_freq != sr:
+            self.audio_resample_transform = torchaudio.transforms.Resample(sr, self.target_sample)
+        wav = self.audio_resample_transform(wav).numpy()[0]
+        return wav, sr, self.target_sample, self.hop_size
+
+    def f0_to_wav(self, f0):
+        return self.net_g_ms.pitch2wav(f0), self.target_sample
+
     def get_unit_f0(self, wav, speaker):
         assert self.f0_manager is not None and self.speech_encoder_manager is not None
         f0, uv = self.f0_manager.compute_f0_uv_tran(wav)
+
+        f0 = torch.FloatTensor(f0).to(self.device)
+        uv = torch.FloatTensor(uv).to(self.device)
+
+        f0 = f0.unsqueeze(0)
+        uv = uv.unsqueeze(0)
 
         wav = torch.from_numpy(wav).to(self.device)
         if not hasattr(self, "audio16k_resample_transform"):
@@ -296,16 +270,13 @@ class Svc(object):
     #         f0_chunks.append(f0_chunk)
     #     return np.concatenate(f0_chunks)
 
-    def infer(self, speaker, tran, raw_path,
-              cluster_infer_ratio=0,
+    def infer(self, speaker, raw_path,
               auto_predict_f0=False,
               noice_scale=0.4,
-              f0_filter=False,
               frame=0,
               spk_mix=False,
               loudness_envelope_adjustment=1
               ):
-        torchaudio.set_audio_backend("soundfile")
         wav, sr = torchaudio.load(raw_path)
         if not hasattr(self, "audio_resample_transform") or self.audio16k_resample_transform.orig_freq != sr:
             self.audio_resample_transform = torchaudio.transforms.Resample(sr, self.target_sample)
@@ -372,9 +343,9 @@ class Svc(object):
             #         self.hps_ms.data.hop_length,
             #         adaptive_key=enhancer_adaptive_key)
 
-            if self.post_processor is not None:
+            if self.post_processor_manager is not None:
                 # TODO
-                audio = self.post_processor.process(
+                audio = self.post_processor_manager.process(
                     audio,
                     self.target_sample,
                     c, f0, vol,
@@ -402,9 +373,7 @@ class Svc(object):
     def slice_inference(self,
                         raw_audio_path,
                         spk,
-                        tran,
                         slice_db,
-                        cluster_infer_ratio,
                         auto_predict_f0,
                         noice_scale,
                         use_spk_mix=False,
@@ -506,8 +475,7 @@ class Svc(object):
                 raw_path = io.BytesIO()
                 soundfile.write(raw_path, dat, audio_sr, format="wav")
                 raw_path.seek(0)
-                out_audio, out_sr, out_frame = self.infer(spk, tran, raw_path,
-                                                          cluster_infer_ratio=cluster_infer_ratio,
+                out_audio, out_sr, out_frame = self.infer(spk, raw_path,
                                                           auto_predict_f0=auto_predict_f0,
                                                           noice_scale=noice_scale,
                                                           frame=global_frame,
@@ -529,109 +497,109 @@ class Svc(object):
                 audio.extend(list(_audio))
         return np.array(audio)
 
-    def slice_inference_with_f0(self, raw_audio_path, f0, spk, tran, slice_db, cluster_infer_ratio,
-                                auto_predict_f0, noise_scale, pad_seconds=0.5):
-        wav_path = Path(raw_audio_path).with_suffix('.wav')
-        chunks = slicer.cut(wav_path, db_thresh=slice_db)
-        audio_data, audio_sr = slicer.chunks2audio(wav_path, chunks)
-
-        per_size = int(self.clip_seconds * audio_sr)
-        lg_size = int(self.lg_num * audio_sr)
-        lg_size_r = int(lg_size * self.lgr_num)
-        lg_size_c_l = (lg_size - lg_size_r) // 2
-        lg_size_c_r = lg_size - lg_size_r - lg_size_c_l
-        lg = np.linspace(0, 1, lg_size_r) if lg_size != 0 else 0
-
-        audio = []
-        f0_output = []
-        f0_index = 0
-
-        for (slice_tag, data) in audio_data:
-            print(f'#=====segment start, {round(len(data) / audio_sr, 3)}s======')
-
-            if slice_tag:
-                print('jump empty segment')
-                _audio = np.zeros(len(data))
-                audio.extend(list(_audio))
-                f0_output.extend([0] * (len(data) // self.hop_size))
-                continue
-
-            # 현재 청크의 f0 계산
-            f0_chunk = f0[f0_index:f0_index + len(data) // self.hop_size]
-            f0_index += len(data) // self.hop_size
-
-            # clip_seconds에 따라 청크 나누기
-            datas = split_list_by_n(data, per_size, lg_size)
-            f0_chunks = split_list_by_n(f0_chunk, per_size // self.hop_size, lg_size // self.hop_size)
-
-            for k, (dat, f0_dat) in enumerate(zip(datas, f0_chunks)):
-                print(f'----->segment clip start, {round(len(dat) / audio_sr, 3)}s======')
-                pad_len = int(audio_sr * pad_seconds)
-                dat = np.concatenate([np.zeros([pad_len]), dat, np.zeros([pad_len])])
-                f0_dat = np.concatenate(
-                    [np.zeros(pad_len // self.hop_size), f0_dat, np.zeros(pad_len // self.hop_size)])
-
-                # 추론을 위한 임시 파일 생성
-                raw_path = io.BytesIO()
-                soundfile.write(raw_path, dat, audio_sr, format="wav")
-                raw_path.seek(0)
-
-                # 수정된 f0를 사용하여 추론
-                out_audio, out_sr, out_f0 = self.infer_with_f0(
-                    spk, tran, raw_path, f0_dat,
-                    cluster_infer_ratio=cluster_infer_ratio,
-                    auto_predict_f0=auto_predict_f0,
-                    noise_scale=noise_scale
-                )
-
-                out_audio = out_audio.cpu().numpy()
-
-                # 패딩 제거
-                out_audio = out_audio[pad_len:-pad_len]
-                out_f0 = out_f0[pad_len // self.hop_size: -(pad_len // self.hop_size)]
-
-                # crossfade 적용
-                if k != 0:
-                    out_audio[:lg_size_r] = out_audio[:lg_size_r] * lg + audio[-lg_size_r:] * (1 - lg)
-                    out_f0[:lg_size_r // self.hop_size] = out_f0[:lg_size_r // self.hop_size] * lg[
-                                                                                                :lg_size_r // self.hop_size] + f0_output[
-                                                                                                                               -lg_size_r // self.hop_size:] * (
-                                                                      1 - lg[:lg_size_r // self.hop_size])
-                    audio = audio[:-lg_size_r]
-                    f0_output = f0_output[:-lg_size_r // self.hop_size]
-
-                audio.extend(list(out_audio))
-                f0_output.extend(list(out_f0))
-
-        return np.array(audio), np.array(f0_output)
-
-    def infer_with_f0(self, speaker, tran, raw_path, f0, cluster_infer_ratio=0, auto_predict_f0=False, noise_scale=0.4):
-        # infer 메소드와 유사하지만 f0를 직접 받아 사용
-        wav, sr = torchaudio.load(raw_path)
-        wav = self.audio_resample_transform(wav).numpy()[0]
-
-        c, _, uv = self.get_unit_f0(wav, tran, cluster_infer_ratio, speaker, False)
-
-        # 제공된 f0 사용
-        f0 = torch.FloatTensor(f0).unsqueeze(0).to(self.device)
-
-        c = c.to(self.dtype)
-        f0 = f0.to(self.dtype)
-        uv = uv.to(self.dtype)
-
-        with torch.no_grad():
-            sid = torch.LongTensor([self.spk2id[speaker]]).to(self.device).unsqueeze(0)
-            audio = self.net_g_ms.infer(c, f0=f0, g=sid, uv=uv, predict_f0=auto_predict_f0, noise_scale=noise_scale)[0][
-                0].data.float()
-
-            if self.post_processor is not None:
-                vol = self.volume_extractor.extract(audio.unsqueeze(0))[0]
-                audio = self.post_processor.process(
-                    audio, self.target_sample, c, f0, vol,
-                    self.hop_size, spk_id=sid
-                )
-
-        return audio, self.target_sample, f0.shape[1]
+    # def slice_inference_with_f0(self, raw_audio_path, f0, spk, tran, slice_db, cluster_infer_ratio,
+    #                             auto_predict_f0, noise_scale, pad_seconds=0.5):
+    #     wav_path = Path(raw_audio_path).with_suffix('.wav')
+    #     chunks = slicer.cut(wav_path, db_thresh=slice_db)
+    #     audio_data, audio_sr = slicer.chunks2audio(wav_path, chunks)
+    #
+    #     per_size = int(self.clip_seconds * audio_sr)
+    #     lg_size = int(self.lg_num * audio_sr)
+    #     lg_size_r = int(lg_size * self.lgr_num)
+    #     lg_size_c_l = (lg_size - lg_size_r) // 2
+    #     lg_size_c_r = lg_size - lg_size_r - lg_size_c_l
+    #     lg = np.linspace(0, 1, lg_size_r) if lg_size != 0 else 0
+    #
+    #     audio = []
+    #     f0_output = []
+    #     f0_index = 0
+    #
+    #     for (slice_tag, data) in audio_data:
+    #         print(f'#=====segment start, {round(len(data) / audio_sr, 3)}s======')
+    #
+    #         if slice_tag:
+    #             print('jump empty segment')
+    #             _audio = np.zeros(len(data))
+    #             audio.extend(list(_audio))
+    #             f0_output.extend([0] * (len(data) // self.hop_size))
+    #             continue
+    #
+    #         # 현재 청크의 f0 계산
+    #         f0_chunk = f0[f0_index:f0_index + len(data) // self.hop_size]
+    #         f0_index += len(data) // self.hop_size
+    #
+    #         # clip_seconds에 따라 청크 나누기
+    #         datas = split_list_by_n(data, per_size, lg_size)
+    #         f0_chunks = split_list_by_n(f0_chunk, per_size // self.hop_size, lg_size // self.hop_size)
+    #
+    #         for k, (dat, f0_dat) in enumerate(zip(datas, f0_chunks)):
+    #             print(f'----->segment clip start, {round(len(dat) / audio_sr, 3)}s======')
+    #             pad_len = int(audio_sr * pad_seconds)
+    #             dat = np.concatenate([np.zeros([pad_len]), dat, np.zeros([pad_len])])
+    #             f0_dat = np.concatenate(
+    #                 [np.zeros(pad_len // self.hop_size), f0_dat, np.zeros(pad_len // self.hop_size)])
+    #
+    #             # 추론을 위한 임시 파일 생성
+    #             raw_path = io.BytesIO()
+    #             soundfile.write(raw_path, dat, audio_sr, format="wav")
+    #             raw_path.seek(0)
+    #
+    #             # 수정된 f0를 사용하여 추론
+    #             out_audio, out_sr, out_f0 = self.infer_with_f0(
+    #                 spk, tran, raw_path, f0_dat,
+    #                 cluster_infer_ratio=cluster_infer_ratio,
+    #                 auto_predict_f0=auto_predict_f0,
+    #                 noise_scale=noise_scale
+    #             )
+    #
+    #             out_audio = out_audio.cpu().numpy()
+    #
+    #             # 패딩 제거
+    #             out_audio = out_audio[pad_len:-pad_len]
+    #             out_f0 = out_f0[pad_len // self.hop_size: -(pad_len // self.hop_size)]
+    #
+    #             # crossfade 적용
+    #             if k != 0:
+    #                 out_audio[:lg_size_r] = out_audio[:lg_size_r] * lg + audio[-lg_size_r:] * (1 - lg)
+    #                 out_f0[:lg_size_r // self.hop_size] = out_f0[:lg_size_r // self.hop_size] * lg[
+    #                                                                                             :lg_size_r // self.hop_size] + f0_output[
+    #                                                                                                                            -lg_size_r // self.hop_size:] * (
+    #                                                                   1 - lg[:lg_size_r // self.hop_size])
+    #                 audio = audio[:-lg_size_r]
+    #                 f0_output = f0_output[:-lg_size_r // self.hop_size]
+    #
+    #             audio.extend(list(out_audio))
+    #             f0_output.extend(list(out_f0))
+    #
+    #     return np.array(audio), np.array(f0_output)
+    #
+    # def infer_with_f0(self, speaker, tran, raw_path, f0, cluster_infer_ratio=0, auto_predict_f0=False, noise_scale=0.4):
+    #     # infer 메소드와 유사하지만 f0를 직접 받아 사용
+    #     wav, sr = torchaudio.load(raw_path)
+    #     wav = self.audio_resample_transform(wav).numpy()[0]
+    #
+    #     c, _, uv = self.get_unit_f0(wav, speaker)
+    #
+    #     # 제공된 f0 사용
+    #     f0 = torch.FloatTensor(f0).unsqueeze(0).to(self.device)
+    #
+    #     c = c.to(self.dtype)
+    #     f0 = f0.to(self.dtype)
+    #     uv = uv.to(self.dtype)
+    #
+    #     with torch.no_grad():
+    #         sid = torch.LongTensor([self.spk2id[speaker]]).to(self.device).unsqueeze(0)
+    #         audio = self.net_g_ms.infer(c, f0=f0, g=sid, uv=uv, predict_f0=auto_predict_f0, noise_scale=noise_scale)[0][
+    #             0].data.float()
+    #
+    #         if self.post_processor is not None:
+    #             vol = self.volume_extractor.extract(audio.unsqueeze(0))[0]
+    #             audio = self.post_processor.process(
+    #                 audio, self.target_sample, c, f0, vol,
+    #                 self.hop_size, spk_id=sid
+    #             )
+    #
+    #     return audio, self.target_sample, f0.shape[1]
 
     def realtime_infer(self, speaker_id, f_pitch_change, input_wav_path,
                 cluster_infer_ratio=0,
@@ -672,4 +640,67 @@ class Svc(object):
             self.last_chunk = audio[-self.pre_len:]
             self.last_o = audio
             return ret[self.chunk_len:2 * self.chunk_len]
+
+class SVCManager():
+    def __init__(self):
+        self.device = "cpu"
+        self.svc_modes = ["so-vits-svc-4.0"]
+        self.svc = None
+        self.svc_object = None
+        self.hps_ms = None
+
+    def initialize(self, svc, model_path, config, threshold, use_spk_mix,
+                   pad_seconds=0.5, clip_seconds=0, lg_num=0, lgr_num=0.75, device="cpu"):
+        self.device = device
+
+        self.pad_seconds = pad_seconds
+        self.clip_seconds = clip_seconds
+        self.lg_num = lg_num
+        self.lgr_num = lgr_num
+        self.threshold = threshold
+
+        self.svc = svc
+        self.svc_object = self.get_svc(svc, model_path, config, threshold, use_spk_mix,
+                                       pad_seconds, clip_seconds, lg_num, lgr_num, device)
+        self.hps_ms = self.svc_object.hps_ms
+        self.spk2id = self.svc_object.spk2id
+        self.speech_encoder = self.svc_object.speech_encoder
+
+
+    def get_svc(self, svc, model_path, config, threshold, use_spk_mix,
+                pad_seconds, clip_seconds, lg_num, lgr_num, device):
+        if svc == "so-vits-svc-4.0":
+            return Svc(model_path, config, threshold, use_spk_mix,
+                       pad_seconds, clip_seconds, lg_num, lgr_num, device)
+        else:
+            raise Exception(f"Unsupported svc: {svc}, available: {self.svc_modes}")
+
+    def load_components(self, f0, speech_encoder, post_processing):
+        self.svc_object.initialize(speech_encoder, f0, post_processing)
+
+    def get_f0(self, raw_audio_path):
+        # Load the audio file to target sampling rate
+        wav, _, sr, hop_size = self.svc_object.load_wav(raw_audio_path)
+        # wav size
+        print(f"wav size: {wav.shape}")
+        f0, _ = self.svc_object.f0_manager.compute_f0_uv_tran(wav)
+
+        # f0 to tensor
+        f0 = torch.FloatTensor(f0).to(self.device)
+
+        return f0, sr, hop_size
+
+    def f0_to_wav(self, f0):
+        wav, sr = self.svc_object.f0_to_wav(f0)
+        return wav, sr
+
+    def infer_slice(self, raw_audio_path, spk, slice_db, auto_predict_f0, noice_scale, use_spk_mix, loudness_envelope_adjustment):
+        audio = self.svc_object.slice_inference(raw_audio_path, spk, slice_db, auto_predict_f0, noice_scale, use_spk_mix, loudness_envelope_adjustment)
+        return audio
+
+    def realtime_infer(self):
+        pass
+
+    def unload_model(self):
+        self.svc_object.unload_model()
 

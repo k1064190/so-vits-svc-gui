@@ -105,3 +105,4 @@ class RMVPEF0Predictor(F0Predictor):
             rtn = f0.cpu().numpy() if p_len is None else np.zeros(p_len)
             return rtn,rtn
         return self.post_process(x,self.sampling_rate,f0,p_len)
+

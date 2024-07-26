@@ -41,12 +41,14 @@ class InferenceTab(QWidget):
         self.devices = get_available_devices()
         self.preset_folder = "presets"
         self.presets = load_json_file(self.preset_folder)
-        
-        self.common_arguments = {
+        self.path_arguments = {
             "model_path": None,
             "config_path": None,
             "cluster_model_path": None,
             "speaker": 0,
+            "speech_encoder": None,
+        }
+        self.common_arguments = {
             "silence_threshold": 0,
             "cr_threshold": 0,
             "pitch_shift": 0,
@@ -55,13 +57,13 @@ class InferenceTab(QWidget):
             "chunk_seconds": 0,
             "linear_gradient": 0,
             "linear_gradient_retain": 0,
+            "cluster_infer_ratio": 0,
             "retrieval": False,
             "f0_modification": False,
             "use_volume": False,
             "auto_predict_f0": False,
             "f0": 0,
             "svc": 0,
-            "speech_encoder": None,
             "post_processing": 0,
         }
         self.realtime_arguments = {
@@ -111,8 +113,8 @@ class InferenceTab(QWidget):
     def create_paths_group(self) -> QGroupBox:
         paths_group = QGroupBox("Paths")
         paths_layout = QVBoxLayout(paths_group)
-        paths_layout.addWidget(self.create_path_input("Model path", "Select Model File", self.common_arguments, "model_path"))
-        self.config = self.create_path_input("Config path", "Select Config File", self.common_arguments, "config_path")
+        paths_layout.addWidget(self.create_path_input("Model path", "Select Model File", self.path_arguments, "model_path", directory="Model Files (*.pth)"))
+        self.config = self.create_path_input("Config path", "Select Config File", self.path_arguments, "config_path", directory="Config Files (*.json)")
         paths_layout.addWidget(self.config)
 
         # Load config file on config file change and reflect its change on the UI
@@ -121,17 +123,22 @@ class InferenceTab(QWidget):
         self.config_line_edit.returnPressed.connect(self.load_config)
         self.config_btn.clicked.connect(self.load_config)
 
-        paths_layout.addWidget(self.create_path_input("Cluster model path (Optional)", "Select Cluster Model File", self.common_arguments, "cluster_model_path"))
+        paths_layout.addWidget(self.create_path_input("Cluster model path (Optional)", "Select Cluster Model File", self.path_arguments, "cluster_model_path"))
         return paths_group
 
     def load_config(self):
         config_path = self.config_line_edit.text()
+        if not config_path or not os.path.exists(config_path):
+            return
         self.inference_manager.load_config(config_path)
-        self.spk = self.inference_manager.hps_ms.spk.keys()
+        self.spk = self.inference_manager.spk2id.keys()
+        speech_encoder = self.inference_manager.SE
 
         # Set the speaker combo box with the available speakers
         self.clear_combo_box(self.speaker_box, self.spk, 0)
-        self.common_arguments["speaker"] = 0
+        self.path_arguments["speaker"] = 0
+        self.path_arguments["speech_encoder"] = speech_encoder
+
 
     def create_common_group(self) -> QScrollArea:
         common_scroll_area = QScrollArea()
@@ -140,7 +147,9 @@ class InferenceTab(QWidget):
         common_group = QGroupBox("Common")
         common_layout = QVBoxLayout(common_group)
 
-        self.speaker_widget = self.create_combo_box("Speaker", [], self.common_arguments, "speaker", 1)
+        # SVC
+        self.svc_widget = self.create_combo_box("SVC", self.svc_modes, self.common_arguments, "svc", 1)
+        self.speaker_widget = self.create_combo_box("Speaker", [], self.path_arguments, "speaker", 1)
         self.speaker_box = self.speaker_widget.layout().itemAt(1).widget()
         common_layout.addWidget(self.speaker_widget)
         common_layout.addWidget(self.create_slider("Silence threshold", -35.0, -100.0, 0.0, 1.0, self.common_arguments, "silence_threshold"))
@@ -153,6 +162,7 @@ class InferenceTab(QWidget):
 
         # Cluster, feature retrieval
         common_layout.addWidget(self.create_check_box("Feature Retrieval(Cluster required)", self.common_arguments, "retrieval"))
+        common_layout.addWidget(self.create_slider("Cluster Inference Ratio", 0.4, 0.0, 1.0, 0.01, self.common_arguments, "cluster_infer_ratio"))
 
         common_layout.addWidget(self.create_radio_button("F0 method", self.f0_modes, self.common_arguments, "f0"))
         common_layout.addWidget(self.create_slider("CR Threshold", 0.05, 0.0, 1.0, 0.01, self.common_arguments, "cr_threshold"))
@@ -178,8 +188,8 @@ class InferenceTab(QWidget):
     def create_file_group(self) -> QGroupBox:
         file_group = QGroupBox("File")
         file_layout = QVBoxLayout(file_group)
-        file_layout.addWidget(self.create_path_input("Input audio path", "Select Input Audio File", self.file_arguments, "input_audio"))
-        file_layout.addWidget(self.create_path_input("Output audio path", "Select Output Audio File", self.file_arguments, "output_audio"))
+        file_layout.addWidget(self.create_path_input("Input audio path", "Select Input Audio File", self.file_arguments, "input_audio", directory="Audio Files (*.wav *.mp3 *.flac)"))
+        file_layout.addWidget(self.create_path_input("Output audio path", "Select Output Audio File", self.file_arguments, "output_audio", directory="Audio Files (*.wav)"))
 
         self.graph = AudioPlayer()
         file_layout.addWidget(self.graph)
@@ -191,7 +201,7 @@ class InferenceTab(QWidget):
     def create_run_arguments_group(self) -> QGroupBox:
         run_arguments_group = QGroupBox("Run Arguments")
         run_arguments_layout = QHBoxLayout(run_arguments_group)
-        f0_modification_widget = self.create_button("F0 Modification", lambda: {})
+        f0_modification_widget = self.create_button("F0 Modification", self.f0_estimation)
         run_arguments_layout.addWidget(f0_modification_widget)
         button = self.create_button("Run", self.run)
         run_arguments_layout.addWidget(button)
@@ -216,7 +226,7 @@ class InferenceTab(QWidget):
     def create_preset_group(self) -> QGroupBox:
         preset_group = QGroupBox("Presets")
         preset_layout = QVBoxLayout(preset_group)
-        
+
         preset_select_delete = QHBoxLayout()
         preset_select = self.create_combo_box("Select preset", list(self.presets.keys()))
         preset_combo_box = preset_select.layout().itemAt(1).widget()
@@ -267,7 +277,7 @@ class InferenceTab(QWidget):
         button.clicked.connect(callback)
         return button
 
-    def create_path_input(self, label: str, dialog_title: str, arguments_dict: Optional[Dict[str, Any]] = None, var_name: Optional[str] = None) -> QWidget:
+    def create_path_input(self, label: str, dialog_title: str, arguments_dict: Optional[Dict[str, Any]] = None, var_name: Optional[str] = None, directory: str = "All Files (*)") -> QWidget:
         layout = QHBoxLayout()
         layout.addWidget(QLabel(label))
         line_edit = QLineEdit()
@@ -281,7 +291,7 @@ class InferenceTab(QWidget):
                 arguments_dict[var_name] = line_edit.text()
 
         def open_file_dialog() -> None:
-            file_path, _ = QFileDialog.getOpenFileName(self, dialog_title, "", "All Files (*)")
+            file_path, _ = QFileDialog.getOpenFileName(self, dialog_title, "", directory)
             if file_path:
                 line_edit.setText(file_path)
                 update()
@@ -463,16 +473,42 @@ class InferenceTab(QWidget):
         # Set the combo box to the previous index
         self.clear_combo_box(combo_box, list(self.presets.keys()), idx-1)
 
-    def load_model(self):
-        model_path = self.common_arguments["model_path"]
-        config_path = self.common_arguments["config_path"]
-        cluster_model_path = self.common_arguments["cluster_model_path"]
-        self.common_arguments["model"] = self.inference_manager.load_model(model_path, config_path, cluster_model_path)
+    def check_availability(self) -> bool:
+        if not self.path_arguments["model_path"] or not os.path.exists(self.path_arguments["model_path"]):
+            print("Model path is required.")
+            return False
+        if not self.path_arguments["config_path"] or not self.inference_manager.config_loaded():
+            print("Config path is required.")
+            return False
+        if self.devices is None or len(self.devices) <= 0:
+            print("No suitable devices found.")
+            return False
+        return True
+
+    def current_device(self):
+        return self.devices[self.device_arguments["device"]][1]
+
+    def f0_estimation(self):
+        if not self.check_availability():
+            return
+
+        device = self.current_device()
+        self.inference_manager.load_model(self.common_arguments, self.path_arguments, device)
+
+        input_audio_path = self.file_arguments["input_audio"]
+        f0, target_sr, hop_size = self.inference_manager.get_f0(input_audio_path)
+        # f0 to wav
+        wav = self.inference_manager.f0_to_wav(f0)
+        self.graph.load_audio(wav, target_sr)
 
     def run(self):
-        print(f"common: {self.common_arguments}")
+        # Check for required fields
+        if not self.check_availability():
+            return
+
         # Pass inference arguments to inference manager
-        # self.inference_manager.load_model(self.common_arguments)
+        device = self.current_device()
+        self.inference_manager.load_model(self.common_arguments, self.path_arguments, device)
 
     def closeEvent(self, ev: QCloseEvent) -> None:
         ev.accept()

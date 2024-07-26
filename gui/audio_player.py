@@ -52,6 +52,7 @@ class NumpyPlayer(QMediaPlayer):
         # clear the player state
         self.stop()
         self.setPosition(0)
+
 class AudioPlayer(pg.PlotWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -105,6 +106,7 @@ class AudioPlayer(pg.PlotWidget):
             pen=self.linePen,
             **self.symbol
         )
+
 
     def load_wavefile(self, wavefile):
         # Load the audio file
