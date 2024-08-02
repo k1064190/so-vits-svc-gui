@@ -48,11 +48,13 @@ class SpeechEncoderManager:
         # If speech encoder and object is None, load the speech encoder
         # if not, load the speech encoder only if the speech encoder is different
 
-        self.device = device
-
         if self.speech_encoder is None or self.speech_encoder != speech_encoder:
             self.speech_encoder = speech_encoder
-            self.speech_encoder_object = self.get_speech_encoder(self.speech_encoder, self.device, **kwargs)
+            self.speech_encoder_object = self.get_speech_encoder(self.speech_encoder, device, **kwargs)
+
+            print(f"Initialized speech encoder: {speech_encoder} on {device}.")
+
+        self.device = device
         self.cluster_infer_ratio = cluster_infer_ratio
         self.feature_retrieval = feature_retrieval
         self.spk2id = spk2id
@@ -129,7 +131,7 @@ class SpeechEncoderManager:
             raise Exception("Speech encoder not initialized. Call initialize() first.")
 
         # Encode the audio
-        c = self.speech_encoder_object.encode(wav16k)
+        c = self.speech_encoder_object.encoder(wav16k)
 
         # Apply cluster inference if enabled
         if self.cluster_infer_ratio != 0 and self.cluster_model is not None:

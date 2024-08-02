@@ -35,24 +35,29 @@ class f0Manager:
 
         Returns: f0_predictor
         '''
+
+        # if the arguments are different, reinitialize the f0_predictor
+        if self.f0_predictor != f0_predictor or \
+                self.hop_size != hop_size or self.target_sample != target_sample or self.device != device or \
+                self.cr_threshold != cr_threshold:
+            self.f0_predictor = f0_predictor
+            self.f0_predictor_object = self.get_f0_predictor(f0_predictor=f0_predictor,
+                                                              hop_length=hop_size,
+                                                              f0_min=self.f0_min,
+                                                              f0_max=self.f0_max,
+                                                              sampling_rate=target_sample,
+                                                              device=device,
+                                                              threshold=cr_threshold)
+
+            print(f"Initialized f0 predictor on {device}.")
+
         self.device = device
 
         self.hop_size = hop_size
         self.target_sample = target_sample
         self.cr_threshold = cr_threshold
         self.trans = trans
-        # if the arguments are different, reinitialize the f0_predictor
-        if f0_predictor is None or self.f0_predictor != f0_predictor or \
-                self.hop_size != hop_size or self.target_sample != target_sample or self.device != device or \
-                self.cr_threshold != cr_threshold:
-            self.f0_predictor = f0_predictor
-            self.f0_predictor_object = self.get_f0_predictor(f0_predictor=self.f0_predictor,
-                                                             hop_length=self.hop_size,
-                                                             f0_min=self.f0_min,
-                                                             f0_max=self.f0_max,
-                                                             sampling_rate=self.target_sample,
-                                                             device=self.device,
-                                                             threshold=self.cr_threshold)
+
         return self.f0_predictor_object
 
     def get_f0_predictor(self, f0_predictor, hop_length, f0_min, f0_max, sampling_rate, **kargs):
@@ -76,7 +81,15 @@ class f0Manager:
 
     def compute_f0_uv_tran(self, wav):
         f0, uv = self.f0_predictor_object.compute_f0_uv(wav)
+
+        f0 = torch.FloatTensor(f0).to(self.device)
+        uv = torch.FloatTensor(uv).to(self.device)
+
+        f0 = f0.unsqueeze(0)
+        uv = uv.unsqueeze(0)
+
         f0 = f0 * 2 ** (self.trans / 12)
+
         return f0, uv
 
     def compute_f0_uv(self, wav):
