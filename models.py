@@ -537,7 +537,7 @@ class SynthesizerTrn(nn.Module):
         f0 = self.dec.f0_upsamp(f0).transpose(1, 2)  # [batch_size, len, 1]
 
         # NSF 모델을 사용하여 하모닉 소스 생성
-        har_source = self.dec.m_source(f0)
+        har_source, _, _ = self.dec.m_source(f0)
         har_source = har_source.transpose(1, 2)  # [batch_size, 1, len]
 
         MAX_WAV_VALUE = 32768.0
