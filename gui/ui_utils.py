@@ -4,6 +4,7 @@ import os.path
 
 import torch
 import sounddevice as sd
+import soundfile as sf
 from PyQt5.QtWidgets import QDesktopWidget, QHBoxLayout, QVBoxLayout
 
 
@@ -24,6 +25,14 @@ def get_available_devices():
     if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         devices.append(("Apple MPS", "mps"))
 
+    # # Check for xla
+    # try:
+    #     import torch_xla.core.xla_model as xm
+    #     if xm.xrt_world_size() > 0:
+    #         devices.append(("TPU", "xla"))
+    # except ImportError:
+    #     pass
+
     return devices
 
 
@@ -41,7 +50,6 @@ def get_audio_devices():
     return input_devices, output_devices
 
 def calculateWindowSize():
-    # 현재 스크린의 가용 영역 얻기
     screen = QDesktopWidget().availableGeometry()
 
     # set 2/3 of the screen size as the default size
@@ -88,6 +96,13 @@ def create_QVBox(widgets, parent=None):
     for widget in widgets:
         vbox.addWidget(widget)
     return vbox
+
+
+def get_supported_file_types_concat() -> str:
+    # "Audio Files (*.wav *.mp3 *.flac)"
+    formats = [f"*.{ext.lower()}" for ext in sf.available_formats().keys()]
+    return "Audio Files" + " ".join(formats)
+
 
 # def split_silence(
 #     audio: ndarray[Any, dtype[float32]],

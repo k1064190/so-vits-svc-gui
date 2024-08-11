@@ -6,16 +6,26 @@ import torchaudio
 import numpy as np
 from typing import Optional, Any
 import cluster
+import utils
 
 
 class SpeechEncoderManager:
     def __init__(self):
         self.device = "cpu"
         self.speech_encoder_modes = [
-            "vec768l12", "vec256l9", "vec256l9-onnx", "vec256l12-onnx",
-            "vec768l9-onnx", "vec768l12-onnx", "hubertsoft-onnx", "hubertsoft",
-            "whisper-ppg", "cnhubertlarge", "dphubert", "whisper-ppg-large",
-            "wavlmbase+"
+            "vec768l12",
+            "vec256l9",
+            "vec256l9-onnx",
+            "vec256l12-onnx",
+            "vec768l9-onnx",
+            "vec768l12-onnx",
+            "hubertsoft-onnx",
+            "hubertsoft",
+            "whisper-ppg",
+            "cnhubertlarge",
+            "dphubert",
+            "whisper-ppg-large",
+            "wavlmbase+",
         ]
         self.speech_encoder = None
         self.speech_encoder_object = None
@@ -25,12 +35,20 @@ class SpeechEncoderManager:
         self.cluster_model = None
         self.big_npy = None
         self.now_spk_id = -1
-        self.unit_interpolate_mode = 'left'
+        self.unit_interpolate_mode = "left"
 
-    def initialize(self, speech_encoder: str, cluster_infer_ratio: float = 0,
-                   feature_retrieval: bool = False, spk2id: dict = {},
-                   cluster_model_path: str = None, target_sample: int = 16000,
-                   unit_interpolate_mode: str = 'left', device="cpu", **kwargs):
+    def initialize(
+        self,
+        speech_encoder: str,
+        cluster_infer_ratio: float = 0,
+        feature_retrieval: bool = False,
+        spk2id: dict = {},
+        cluster_model_path: str = None,
+        target_sample: int = 16000,
+        unit_interpolate_mode: str = "left",
+        device="cpu",
+        **kwargs,
+    ):
         """
         Initialize the speech encoder and set various parameters.
 
@@ -50,7 +68,9 @@ class SpeechEncoderManager:
 
         if self.speech_encoder is None or self.speech_encoder != speech_encoder:
             self.speech_encoder = speech_encoder
-            self.speech_encoder_object = self.get_speech_encoder(self.speech_encoder, device, **kwargs)
+            self.speech_encoder_object = self.get_speech_encoder(
+                self.speech_encoder, device, **kwargs
+            )
 
             print(f"Initialized speech encoder: {speech_encoder} on {device}.")
 
@@ -66,57 +86,80 @@ class SpeechEncoderManager:
                 self.now_spk_id = -1
             else:
                 self.cluster_model = cluster.get_cluster_model(cluster_model_path)
+                print(f"Loaded cluster model: {self.cluster_model.items()}")
         else:
             self.cluster_model = None
         self.target_sample = target_sample
         self.unit_interpolate_mode = unit_interpolate_mode
-        self.audio16k_resample_transform = torchaudio.transforms.Resample(target_sample, 16000).to(self.device)
+        self.audio16k_resample_transform = torchaudio.transforms.Resample(
+            target_sample, 16000
+        ).to(self.device)
 
     def get_speech_encoder(self, speech_encoder, device=None, **kwargs):
         if speech_encoder == "vec768l12":
             from vencoder.ContentVec768L12 import ContentVec768L12
+
             speech_encoder_object = ContentVec768L12(device=device)
         elif speech_encoder == "vec256l9":
             from vencoder.ContentVec256L9 import ContentVec256L9
+
             speech_encoder_object = ContentVec256L9(device=device)
         elif speech_encoder == "vec256l9-onnx":
             from vencoder.ContentVec256L9_Onnx import ContentVec256L9_Onnx
+
             speech_encoder_object = ContentVec256L9_Onnx(device=device)
         elif speech_encoder == "vec256l12-onnx":
             from vencoder.ContentVec256L12_Onnx import ContentVec256L12_Onnx
+
             speech_encoder_object = ContentVec256L12_Onnx(device=device)
         elif speech_encoder == "vec768l9-onnx":
             from vencoder.ContentVec768L9_Onnx import ContentVec768L9_Onnx
+
             speech_encoder_object = ContentVec768L9_Onnx(device=device)
         elif speech_encoder == "vec768l12-onnx":
             from vencoder.ContentVec768L12_Onnx import ContentVec768L12_Onnx
+
             speech_encoder_object = ContentVec768L12_Onnx(device=device)
         elif speech_encoder == "hubertsoft-onnx":
             from vencoder.HubertSoft_Onnx import HubertSoft_Onnx
+
             speech_encoder_object = HubertSoft_Onnx(device=device)
         elif speech_encoder == "hubertsoft":
             from vencoder.HubertSoft import HubertSoft
+
             speech_encoder_object = HubertSoft(device=device)
         elif speech_encoder == "whisper-ppg":
             from vencoder.WhisperPPG import WhisperPPG
+
             speech_encoder_object = WhisperPPG(device=device)
         elif speech_encoder == "cnhubertlarge":
             from vencoder.CNHubertLarge import CNHubertLarge
+
             speech_encoder_object = CNHubertLarge(device=device)
         elif speech_encoder == "dphubert":
             from vencoder.DPHubert import DPHubert
+
             speech_encoder_object = DPHubert(device=device)
         elif speech_encoder == "whisper-ppg-large":
             from vencoder.WhisperPPGLarge import WhisperPPGLarge
+
             speech_encoder_object = WhisperPPGLarge(device=device)
         elif speech_encoder == "wavlmbase+":
             from vencoder.WavLMBasePlus import WavLMBasePlus
+
             speech_encoder_object = WavLMBasePlus(device=device)
         else:
-            raise Exception(f"Unsupported speech encoder: {speech_encoder}, available: {self.speech_encoder_modes}")
+            raise Exception(
+                f"Unsupported speech encoder: {speech_encoder}, available: {self.speech_encoder_modes}"
+            )
         return speech_encoder_object
 
-    def encode(self, wav16k: np.ndarray, speaker: Optional[str] = None) -> torch.Tensor:
+    def encode(
+        self,
+        wav16k: np.ndarray,
+        speaker: Optional[str] = None,
+        length: Optional[int] = 0,
+    ) -> torch.Tensor:
         """
         Encode the input audio and apply cluster inference if enabled.
 
@@ -132,6 +175,8 @@ class SpeechEncoderManager:
 
         # Encode the audio
         c = self.speech_encoder_object.encoder(wav16k)
+        if length != 0:
+            c = utils.repeat_expand_2d(c.squeeze(0), length, self.unit_interpolate_mode)
 
         # Apply cluster inference if enabled
         if self.cluster_infer_ratio != 0 and self.cluster_model is not None:
@@ -139,6 +184,8 @@ class SpeechEncoderManager:
                 c = self._apply_feature_retrieval(c, speaker)
             else:
                 c = self._apply_cluster_inference(c, speaker)
+
+        c = c.unsqueeze(0)
 
         return c
 
@@ -164,7 +211,10 @@ class SpeechEncoderManager:
 
     def _apply_cluster_inference(self, c: torch.Tensor, speaker: str) -> torch.Tensor:
         """Apply regular cluster inference."""
-        cluster_c = cluster.get_cluster_center_result(self.cluster_model, c.cpu().numpy().T, speaker).T
+        print(f"Applying cluster inference for speaker: {speaker}")
+        cluster_c = cluster.get_cluster_center_result(
+            self.cluster_model, c.cpu().numpy().T, speaker
+        ).T
         cluster_c = torch.FloatTensor(cluster_c).to(self.device)
         return self.cluster_infer_ratio * cluster_c + (1 - self.cluster_infer_ratio) * c
 
