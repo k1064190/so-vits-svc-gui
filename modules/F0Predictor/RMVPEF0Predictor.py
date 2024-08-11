@@ -95,7 +95,7 @@ class RMVPEF0Predictor(F0Predictor):
         return self.post_process(x,self.sampling_rate,f0,p_len)[0]
     
     def compute_f0_uv(self,wav,p_len=None):
-        x = torch.FloatTensor(wav).to(self.dtype).to(self.device)
+        x = torch.tensor(wav, dtype=self.dtype, device=self.device)
         if p_len is None:
             p_len = x.shape[0]//self.hop_length
         else:
