@@ -5,19 +5,46 @@ from typing import Dict, Any, Optional, Callable, List, Union
 
 import numpy as np
 import torchaudio
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QCloseEvent
+from PyQt5.QtCore import Qt, QTimer, pyqtSlot, pyqtSignal, QObject, QRunnable, QThreadPool, QProcess, QThread
+from PyQt5.QtGui import QCloseEvent, QIcon
 from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QScrollArea, QLabel,
     QComboBox, QPushButton, QLineEdit, QSlider, QRadioButton, QCheckBox,
-    QFileDialog
+    QFileDialog, QStyle
 )
 from scipy.io import wavfile
 
 from audio_player import AudioPlayer
 from manager import *
-from ui_utils import get_audio_devices, get_available_devices, load_json_file, save_json_file
+from ui_utils import get_audio_devices, get_available_devices, load_json_file, save_json_file, \
+    get_supported_file_types_concat
 from widgets_visibility_manager import WidgetVisibilityManager
+
+class RunThread(QThread):
+    finished = pyqtSignal(object)
+
+    def __init__(self, function):
+        super().__init__()
+        self.function = function
+
+    def run(self):
+        result = self.function()
+        self.finished.emit(result)
+
+class WorkerSignals(QObject):
+    finished = pyqtSignal(object)
+
+class Worker(QRunnable):
+    def __init__(self, fn, *args, **kwargs):
+        super(Worker, self).__init__()
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        self.signals = WorkerSignals()
+
+    def run(self):
+        result = self.fn(*self.args, **self.kwargs)
+        self.signals.finished.emit(result)
 
 
 class InferenceTab(QWidget):
@@ -26,10 +53,17 @@ class InferenceTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.init_thread = RunThread(self._delayed_init)
+        self.init_thread.finished.connect(self._on_data_loaded)
+        self.thread = RunThread(self.run)
+        self.thread.finished.connect(self.on_thread_finish)
         self._setup_data()
         self._setup_ui()
         self._setup_connections()
         self._initialize_widget_visibility()
+
+        # Delayed initialization
+        self.init_thread.start()
 
     def _setup_data(self):
         self.inference_manager = infer_manager.InferManager()
@@ -38,19 +72,77 @@ class InferenceTab(QWidget):
         self.svc = self.inference_manager.svc
         self.post_processing = self.inference_manager.post_processing
 
-        self.input_devices, self.output_devices = get_audio_devices()
-        self.devices = get_available_devices()
-        self.presets = load_json_file(self.PRESET_FOLDER)
+        # Postpone heavy operations
+        self.input_devices, self.output_devices = [], []
+        self.devices = []
+        self.presets = {}
 
         self._initialize_arguments()
 
         self.f0_modification_widgets = []
         self.created_widgets = []
 
+    def _delayed_init(self):
+        # Perform heavy operations asynchronously
+        self._load_data()
+
+    def _load_data(self):
+        input_devices, output_devices = get_audio_devices()
+        devices = get_available_devices()
+        presets = load_json_file(self.PRESET_FOLDER)
+        return input_devices, output_devices, devices, presets
+
+    def _on_data_loaded(self, result):
+        self.input_devices, self.output_devices, self.devices, self.presets = result
+        self._update_device_widgets()
+        self._update_preset_widgets()
+
+    def _update_device_widgets(self):
+        print("Devices loaded.")
+        # Update devices
+        if self.devices:
+            device_names = [device[0] for device in self.devices]
+
+            # Set default device (prefer CUDA, MPS, or XLA if available)
+            default_idx = next(
+                (i for i, device in enumerate(self.devices) if any(d in device[1] for d in ['cuda', 'mps', 'xla'])),
+                0)
+
+            self.device_arguments["device"] = default_idx
+            device_combo_box = self.device_widget.layout().itemAt(1).widget()
+            self._clear_combo_box(device_combo_box, device_names, default_idx)
+            self.device_widget.setEnabled(True)
+            self.available = True
+        else:
+            self.device_widget.clear()
+            self.device_widget.addItem("No suitable devices found")
+            self.device_widget.setEnabled(False)
+            self.available = False
+
+        # Update audio devices
+        input_device_names = [device[0] for device in self.input_devices]
+        output_device_names = [device[0] for device in self.output_devices]
+
+        input_combo_box = self.input_device_widget.layout().itemAt(1).widget()
+        output_combo_box = self.output_device_widget.layout().itemAt(1).widget()
+        self._clear_combo_box(input_combo_box, input_device_names, 0)
+        self._clear_combo_box(output_combo_box, output_device_names, 0)
+
+        self.device_arguments["input_device"] = 0
+        self.device_arguments["output_device"] = 0
+
+    def _update_preset_widgets(self):
+        # Update preset-related widgets
+        preset_combo_box = self.preset_combo_box
+        if preset_combo_box is not None and self.presets is not None:
+            self._clear_combo_box(preset_combo_box, list(self.presets.keys()), 0)
+            if preset_combo_box.count() > 0:
+                self._load_gui_preset(preset_combo_box.currentText())
+
     def _initialize_arguments(self):
         self.path_arguments = {
             "model_path": None, "config_path": None, "cluster_model_path": None,
-            "speaker": 0, "speech_encoder": None,
+            "speaker_idx": 0, "speech_encoder": None,
         }
         self.common_arguments = {
             "silence_threshold": 0, "cr_threshold": 0, "pitch_shift": 0,
@@ -121,37 +213,39 @@ class InferenceTab(QWidget):
         if not config_path or not os.path.exists(config_path) or not config_path.endswith(".json"):
             return
         self.inference_manager.load_config(config_path)
-        self.spk = self.inference_manager.spk2id.keys()
+        self.spk = list(self.inference_manager.spk2id.keys())
         speech_encoder = self.inference_manager.SE
 
         self._clear_combo_box(self.speaker_box, self.spk, 0)
-        self.path_arguments["speaker"] = 0
+        self.path_arguments["speaker_idx"] = 0
         self.path_arguments["speech_encoder"] = speech_encoder
 
     def _create_common_group(self) -> QScrollArea:
         common_scroll_area = QScrollArea()
         common_scroll_area.setWidgetResizable(True)
         common_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        common_group = QGroupBox("Common")
-        common_layout = QVBoxLayout(common_group)
+        self.common_group = QGroupBox("Common")
+        common_layout = QVBoxLayout(self.common_group)
 
+        # Add essential widgets immediately
         self._add_common_widgets(common_layout)
 
-        common_scroll_area.setWidget(common_group)
+        common_scroll_area.setWidget(self.common_group)
         return common_scroll_area
 
     def _add_common_widgets(self, layout):
+        # Add only the most important widgets here
         self.svc_widget = self._create_combo_box("SVC", self.svc.svc_modes, self.common_arguments, "svc", 1)
-        self.speaker_widget = self._create_combo_box("Speaker", [], self.path_arguments, "speaker", 1)
+        self.speaker_widget = self._create_combo_box("Speaker", [], self.path_arguments, "speaker_idx", 1)
         self.speaker_box = self.speaker_widget.layout().itemAt(1).widget()
         layout.addWidget(self.speaker_widget)
 
         sliders = [
-            ("Silence threshold", -35.0, -100.0, 0.0, 1.0, "silence_threshold"),
+            ("Silence threshold", -40.0, -100.0, 0.0, 1.0, "silence_threshold"),
             ("Transpose(Pitch Shift)(12 = 1 Octave)", 0, -24, 24, 1, "pitch_shift"),
             ("Noise scale", 0.40, 0.0, 1.0, 0.01, "noise_scale"),
             ("Pad seconds", 0.50, 0.0, 1.0, 0.01, "pad_seconds"),
-            ("Chunk seconds(No Clip When 0)", 0.50, 0.0, 25.0, 0.01, "chunk_seconds"),
+            ("Chunk seconds(No Clip When 0)", 0.0, 0.0, 25.0, 0.01, "chunk_seconds"),
             ("Linear Gradient", 0.0, 0.0, 1.0, 0.01, "linear_gradient"),
             ("Linear Gradient Retain", 0.75, 0.0, 1.0, 0.01, "linear_gradient_retain"),
             ("Loudness Envelope Adjustment", 1.0, 0.0, 1.0, 0.01, "loudness_envelope_adjustment"),
@@ -174,19 +268,8 @@ class InferenceTab(QWidget):
 
         layout.addWidget(self._create_combo_box("F0 method", self.f0_manager.f0_modes, self.common_arguments, "f0"))
 
-        if self.devices:
-            # If there is cuda or mps device, prioritize it
-            idx = 0
-            for i, device in enumerate(self.devices):
-                if "cuda" in device[1] or "mps" in device[1]:
-                    idx = i
-                    break
-            layout.addWidget(
-                self._create_combo_box("Device", [device[0] for device in self.devices], self.device_arguments,
-                                       "device", idx=idx))
-        else:
-            layout.addWidget(QLabel("No suitable devices found."))
-            self.available = False
+        self.device_widget = self._create_combo_box("Device", [], self.device_arguments, "device")
+        layout.addWidget(self.device_widget)
 
         self.realtime_checkbox = self._create_check_box("Realtime", "realtime", arguments_dict=self.realtime_arguments)
         layout.addWidget(self.realtime_checkbox)
@@ -196,10 +279,10 @@ class InferenceTab(QWidget):
         file_layout = QVBoxLayout(file_group)
         file_layout.addWidget(
             self._create_path_input("Input audio path", "Select Input Audio File", self.file_arguments, "input_audio",
-                                    directory="Audio Files (*.wav *.mp3 *.flac)"))
+                                    directory=get_supported_file_types_concat()))
         file_layout.addWidget(
             self._create_path_input("Output audio path", "Select Output Audio File", self.file_arguments,
-                                    "output_audio", directory="Audio Files (*.wav)"))
+                                    "output_audio", directory=get_supported_file_types_concat(), save=True))
 
         self.graph = AudioPlayer()
         file_layout.addWidget(self.graph)
@@ -216,9 +299,18 @@ class InferenceTab(QWidget):
         self.apply_f0_widget = self._create_button("Apply F0 modification", self.apply_f0)
         run_arguments_layout.addWidget(self.apply_f0_widget)
         self.apply_f0_widget.setEnabled(False)
-        button = self._create_button("Run", self.run)
-        run_arguments_layout.addWidget(button)
+        run_worker = Worker(self.run)
+        self.run_button = self._create_button("Run", self.on_run_button_click)
+        run_arguments_layout.addWidget(self.run_button)
         return run_arguments_group
+
+    def on_run_button_click(self):
+        self.run_button.setEnabled(False)
+
+        self.thread.start()
+
+    def on_thread_finish(self, result):
+        self.run_button.setEnabled(True)
 
     def _create_realtime_group(self) -> QGroupBox:
         realtime_group = QGroupBox("Realtime")
@@ -227,11 +319,15 @@ class InferenceTab(QWidget):
             self._create_slider("Crossfade seconds", 0.05, 0, 1, 0.01, "crossfade_seconds", self.realtime_arguments))
         realtime_layout.addWidget(
             self._create_slider("Block seconds", 0.35, 0, 1, 0.01,"block_seconds", self.realtime_arguments))
-        realtime_layout.addWidget(
-            self._create_combo_box("Input device", [device[0] for device in self.input_devices], self.device_arguments,
-                                   "input_device"))
-        realtime_layout.addWidget(self._create_combo_box("Output device", [device[0] for device in self.output_devices],
-                                                         self.device_arguments, "output_device"))
+
+        self.input_device_widget = self._create_combo_box("Input device", [], self.device_arguments,
+                                   "input_device")
+        self.output_device_widget = self._create_combo_box("Output device", [],
+                                                         self.device_arguments, "output_device")
+
+        realtime_layout.addWidget(self.input_device_widget)
+        realtime_layout.addWidget(self.output_device_widget)
+
         return realtime_group
 
     def _create_record_group(self) -> QGroupBox:
@@ -248,6 +344,7 @@ class InferenceTab(QWidget):
         preset_select_delete = QHBoxLayout()
         preset_select = self._create_combo_box("Select preset", list(self.presets.keys()))
         preset_combo_box = preset_select.layout().itemAt(1).widget()
+        self.preset_combo_box = preset_combo_box
         preset_select_delete.addWidget(preset_select, stretch=4)
         preset_delete = QPushButton("Delete")
         preset_delete.clicked.connect(lambda: self._delete_gui_preset(preset_combo_box))
@@ -266,8 +363,6 @@ class InferenceTab(QWidget):
         preset_layout.addLayout(preset_name_add)
 
         preset_combo_box.currentIndexChanged.connect(lambda: self._load_gui_preset(preset_combo_box.currentText()))
-        if preset_combo_box.count() > 0:
-            self._load_gui_preset(preset_combo_box.currentText())
 
         return preset_group
 
@@ -293,7 +388,8 @@ class InferenceTab(QWidget):
         return button
 
     def _create_path_input(self, label: str, dialog_title: str, arguments_dict: Optional[Dict[str, Any]] = None,
-                           var_name: Optional[str] = None, directory: str = "All Files (*)") -> QWidget:
+                           var_name: Optional[str] = None, directory: str = "All Files (*)",
+                           save: bool = False) -> QWidget:
         widget = QWidget()
         layout = QHBoxLayout(widget)
         layout.addWidget(QLabel(label))
@@ -301,6 +397,12 @@ class InferenceTab(QWidget):
         layout.addWidget(line_edit)
         browse_button = QPushButton("Browse")
         layout.addWidget(browse_button)
+
+        # Add folder icon button
+        folder_button = QPushButton()
+        folder_icon = widget.style().standardIcon(QStyle.SP_DirIcon)
+        folder_button.setIcon(folder_icon)
+        layout.addWidget(folder_button)
 
         def update() -> None:
             if arguments_dict is not None and var_name is not None:
@@ -312,7 +414,28 @@ class InferenceTab(QWidget):
                 line_edit.setText(file_path)
                 update()
 
-        browse_button.clicked.connect(open_file_dialog)
+        def open_save_dialog() -> None:
+            file_path, _ = QFileDialog.getSaveFileName(self, dialog_title, "", directory)
+            if file_path:
+                line_edit.setText(file_path)
+                update()
+
+        def open_folder() -> None:
+            path = line_edit.text()
+            if os.path.exists(path):
+                if os.path.isfile(path):
+                    path = os.path.dirname(path)
+
+                if os.name == 'nt':  # Windows
+                    os.startfile(path)
+                else:  # macOS and Linux
+                    QProcess.startDetached('xdg-open', [path])
+            else:
+                print(f"Invalid path: {path}")  # Consider using a proper logging mechanism or showing a message box
+
+        browse_button.clicked.connect(open_file_dialog if not save else open_save_dialog)
+        folder_button.clicked.connect(open_folder)
+
         if arguments_dict is not None and var_name is not None:
             line_edit.textChanged.connect(update)
             setattr(widget, "renew", lambda: line_edit.setText(arguments_dict.get(var_name, "")))
@@ -340,7 +463,7 @@ class InferenceTab(QWidget):
         self.created_widgets.append(widget)
         return widget
 
-    def _clear_combo_box(self, combo_box: QComboBox, items: List[str], name_or_idx: Optional[Union[str, int]]) -> None:
+    def _clear_combo_box(self, combo_box: QComboBox, items: List[str], name_or_idx: Optional[Union[str, int]] = None) -> None:
         combo_box.clear()
         combo_box.addItems(items)
         if name_or_idx is not None:
@@ -495,11 +618,11 @@ class InferenceTab(QWidget):
 
         input_audio_path = self.file_arguments["input_audio"]
         f0 = self.graph.get_f0()
-
+        speaker = self.spk[self.path_arguments["speaker_idx"]]
         if f0 is None:
             wav = self.inference_manager.infer(
                 input_audio_path,
-                self.path_arguments["speaker"],
+                speaker,
                 self.common_arguments["silence_threshold"],
                 self.common_arguments["auto_predict_f0"],
                 self.common_arguments["noise_scale"],
