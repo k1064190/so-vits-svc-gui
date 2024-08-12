@@ -173,7 +173,8 @@ class Svc:
             if self.hps_ms.model.speech_encoder is not None
             else "vec768l12"
         )
-        self.audio16k_resample_transform = None
+        self.audio_resample_transform = None
+        self.audio_resample_transform_orig_freq = None
 
         # real-time
         self.last_chunk = None
@@ -265,12 +266,12 @@ class Svc:
         wav, sr = librosa.load(raw_audio_path, sr=None)
         if (
             not hasattr(self, "audio_resample_transform")
-            or self.audio16k_resample_transform.orig_freq != sr
+            or self.audio_resample_transform_orig_freq != sr
         ):
             self.audio_resample_transform = partial(
                 librosa.resample, orig_sr=sr, target_sr=self.target_sample
             )
-            self.audio_resample_transform.orig_freq = sr
+            self.audio_resample_transform_orig_freq = sr
         wav = self.audio_resample_transform(wav)
         return wav, sr, self.target_sample, self.hop_size
 
@@ -327,12 +328,12 @@ class Svc:
     ) -> Tuple[torch.Tensor, int, int]:
         if (
             not hasattr(self, "audio_resample_transform")
-            or self.audio16k_resample_transform.orig_freq != sr
+            or self.audio_resample_transform_orig_freq != sr
         ):
             self.audio_resample_transform = partial(
                 librosa.resample, orig_sr=sr, target_sr=self.target_sample
             )
-            self.audio_resample_transform.orig_freq = sr
+            self.audio_resample_transform_orig_freq = sr
         wav = self.audio_resample_transform(wav)
         if spk_mix:
             c, f0, uv = self.get_unit_f0(wav, None)
@@ -420,9 +421,10 @@ class Svc:
         noice_scale: float,
         use_spk_mix: bool = False,
         loudness_envelope_adjustment: float = 1,
-        enhancer_adaptive_key=0,
-        k_step=100,
-        second_encoding=False,
+        enhancer_adaptive_key: float = 0,
+        k_step: int = 100,
+        second_encoding: bool = False,
+        use_volume: bool = False,
     ) -> np.ndarray:
         if use_spk_mix:
             if len(self.spk2id) == 1:
@@ -794,6 +796,10 @@ class SVCManager:
         noice_scale: float,
         use_spk_mix: bool,
         loudness_envelope_adjustment: float,
+        enhancer_adaptive_key: float,
+        k_step: int,
+        second_encoding: bool,
+        use_volume: bool,
     ) -> np.ndarray:
         audio = self.svc_object.slice_inference(
             raw_audio_path,
@@ -803,6 +809,10 @@ class SVCManager:
             noice_scale,
             use_spk_mix,
             loudness_envelope_adjustment,
+            enhancer_adaptive_key,
+            k_step,
+            second_encoding,
+            use_volume,
         )
         return audio
 
