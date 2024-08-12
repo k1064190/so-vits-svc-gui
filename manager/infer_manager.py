@@ -38,7 +38,7 @@ class InferManager:
     def config_loaded(self) -> bool:
         return self.hps_ms is not None
 
-    def load_f0(self, f0: str, thres: float, trans: int, device: str):
+    def load_f0(self, f0: int, thres: float, trans: int, device: str):
         f0_model = self.f0.f0_modes[f0]
         self.f0.initialize(
             f0_model, self.hop_size, self.target_sample, device, thres, trans
@@ -60,18 +60,13 @@ class InferManager:
             feature_retrieval,
             spk2id,
             cluter_model_path,
+            target_sample=self.target_sample,
             device=device,
         )
 
-    def load_post_processing(self, post_processing: str):
-        post_processing_model = self.post_processing.post_processing_modes[
-            post_processing
-        ]
-        self.post_processing.initialize(post_processing)
-
     def load_svc(
         self,
-        svc: str,
+        svc: int,
         model_path: str,
         threshold: float,
         use_spk_mix: bool,
@@ -95,6 +90,16 @@ class InferManager:
             device,
         )
 
+    def load_post_processor(
+        self,
+        post_processing: int,
+        model_path: str,
+        config_path: str,
+        device: str = "cpu",
+    ):
+        post_processor = self.post_processing.post_processing_modes[post_processing]
+        self.post_processing.initialize(post_processor, model_path, config_path, device)
+
     def load_model(self, common: Dict[str, Any], path: Dict[str, str], device: str):
         f0 = common["f0"]
         cr_threshold = common["cr_threshold"]
@@ -115,6 +120,8 @@ class InferManager:
         lgr_num = common["linear_gradient_retain"]
 
         post_processing = common["post_processing"]
+        pp_model_path = path["pp_model_path"]
+        pp_config_path = path["pp_config_path"]
 
         self.load_f0(f0, cr_threshold, transposition, device)
         self.load_speech_encoder(
@@ -136,7 +143,7 @@ class InferManager:
             lgr_num,
             device,
         )
-        self.load_post_processing(post_processing)
+        self.load_post_processor(post_processing, pp_model_path, pp_config_path, device)
         self.svc.load_components(self.f0, self.speech_encoder, self.post_processing)
         self.clear_vram()
 

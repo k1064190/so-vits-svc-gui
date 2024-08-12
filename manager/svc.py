@@ -173,6 +173,7 @@ class Svc:
             if self.hps_ms.model.speech_encoder is not None
             else "vec768l12"
         )
+        self.audio16k_resample_transform = None
 
         # real-time
         self.last_chunk = None
@@ -217,6 +218,20 @@ class Svc:
         self.load_speech_encoder(speech_encoder_manager)
         self.load_f0_predictor(f0_manager)
         self.load_post_processor(post_processor_manager)
+
+    def update(
+        self,
+        pad_seconds: float,
+        clip_seconds: float,
+        lg_num: float,
+        lgr_num: float,
+        threshold: float,
+    ):
+        self.pad_seconds = pad_seconds
+        self.clip_seconds = clip_seconds
+        self.lg_num = lg_num
+        self.lgr_num = lgr_num
+        self.slice_db = threshold
 
     def load_speech_encoder(self, speech_encoder_manager: SpeechEncoderManager) -> None:
         assert speech_encoder_manager.speech_encoder == self.speech_encoder
@@ -266,15 +281,10 @@ class Svc:
         f0, uv = self.f0_manager.compute_f0_uv_tran(wav)
 
         wav = torch.from_numpy(wav).to(self.device).to(self.dtype)
-        if not hasattr(self, "audio16k_resample_transform"):
-            self.audio16k_resample_transform = torchaudio.transforms.Resample(
-                self.target_sample, 16000, dtype=self.dtype
-            ).to(self.device)
-        wav16k = self.audio16k_resample_transform(wav[None, :])[0]
 
         # speech_encoder model gets 16khz wav and returns the embedding
         # the embedding is interpolated to match the f0 length <- f0 length is important
-        c = self.speech_encoder_manager.encode(wav16k, speaker, f0.shape[1])
+        c = self.speech_encoder_manager.encode(wav, speaker, f0.shape[1])
 
         return c, f0, uv
 
@@ -310,6 +320,10 @@ class Svc:
         frame: int = 0,
         spk_mix: bool = False,
         loudness_envelope_adjustment: float = 1,
+        post_processor: PostProcessingManager = None,
+        enhancer_adaptive_key: int = 0,
+        k_step: int = 100,
+        second_encoding: bool = False,
     ) -> Tuple[torch.Tensor, int, int]:
         if (
             not hasattr(self, "audio_resample_transform")
@@ -360,39 +374,20 @@ class Svc:
                 c = c.to(torch.float32)
                 f0 = f0.to(torch.float32)
                 uv = uv.to(torch.float32)
-            # audio_mel = self.vocoder.extract(audio[None, :],
-            #                                  self.target_sample) if self.shallow_diffusion else None
-            # if self.only_diffusion or self.shallow_diffusion:
-            #     vol = self.volume_extractor.extract(audio[None, :])[None, :, None].to(
-            #         self.device) if vol is None else vol[:, :, None]
-            #     if self.shallow_diffusion and second_encoding:
-            #         if not hasattr(self, "audio16k_resample_transform"):
-            #             self.audio16k_resample_transform = torchaudio.transforms.Resample(self.target_sample,
-            #                                                                               16000).to(self.device)
-            #         audio16k = self.audio16k_resample_transform(audio[None, :])[0]
-            #         c = self.hubert_model.encoder(audio16k)
-            #         c = utils.repeat_expand_2d(c.squeeze(0), f0.shape[1], self.unit_interpolate_mode)
-            #     f0 = f0[:, :, None]
-            #     c = c.transpose(-1, -2)
-            #     audio_mel = self.diffusion_model(
-            #         c,
-            #         f0,
-            #         vol,
-            #         spk_id=sid,
-            #         spk_mix_dict=None,
-            #         gt_spec=audio_mel,
-            #         infer=True,
-            #         infer_speedup=self.diffusion_args.infer.speedup,
-            #         method=self.diffusion_args.infer.method,
-            #         k_step=k_step)
-            #     audio = self.vocoder.infer(audio_mel, f0).squeeze()
-            # if self.nsf_hifigan_enhance:
-            #     audio, _ = self.enhancer.enhance(
-            #         audio[None, :],
-            #         self.target_sample,
-            #         f0[:, :, None],
-            #         self.hps_ms.data.hop_length,
-            #         adaptive_key=enhancer_adaptive_key)
+
+            audio = post_processor.process(
+                audio,
+                self.speech_encoder_manager,
+                f0,
+                c,
+                vol,
+                target_sample=self.target_sample,
+                enhancer_adaptive_key=enhancer_adaptive_key,
+                hop_length=self.hop_size,
+                sid=sid,
+                k_step=k_step,
+                second_encoding=second_encoding,
+            )
 
             if loudness_envelope_adjustment != 1:
                 audio = utils.change_rms(
@@ -425,6 +420,9 @@ class Svc:
         noice_scale: float,
         use_spk_mix: bool = False,
         loudness_envelope_adjustment: float = 1,
+        enhancer_adaptive_key=0,
+        k_step=100,
+        second_encoding=False,
     ) -> np.ndarray:
         if use_spk_mix:
             if len(self.spk2id) == 1:
@@ -542,6 +540,10 @@ class Svc:
                     frame=global_frame,
                     spk_mix=use_spk_mix,
                     loudness_envelope_adjustment=loudness_envelope_adjustment,
+                    post_processor=self.post_processor_manager,
+                    enhancer_adaptive_key=enhancer_adaptive_key,
+                    k_step=k_step,
+                    second_encoding=second_encoding,
                 )
                 global_frame += out_frame
                 _audio = out_audio.cpu().numpy()
@@ -635,6 +637,8 @@ class SVCManager:
         self.svc: Optional[str] = None
         self.svc_object: Optional[Svc] = None
         self.hps_ms: Optional[Union[HParams, InferHParams]] = None
+        self.model_path: Optional[str] = None
+        self.use_spk_mix: bool = False
 
     def initialize(
         self,
@@ -649,30 +653,51 @@ class SVCManager:
         lgr_num: float = 0.75,
         device: str = "cpu",
     ):
-        self.device = device
+        # if there is no svc model, or svc, model_path, config or device changes, reload the model
+        if (
+            self.svc != svc
+            or self.svc_object is None
+            or self.hps_ms != config
+            or self.device != device
+            or self.model_path != model_path
+            or self.use_spk_mix != use_spk_mix
+        ):
+            self.device = device
+            self.model_path = model_path
+            self.use_spk_mix = use_spk_mix
 
-        self.pad_seconds = pad_seconds
-        self.clip_seconds = clip_seconds
-        self.lg_num = lg_num
-        self.lgr_num = lgr_num
-        self.threshold = threshold
+            self.pad_seconds = pad_seconds
+            self.clip_seconds = clip_seconds
+            self.lg_num = lg_num
+            self.lgr_num = lgr_num
+            self.threshold = threshold
 
-        self.svc = svc
-        self.svc_object = self.get_svc(
-            svc,
-            model_path,
-            config,
-            threshold,
-            use_spk_mix,
-            pad_seconds,
-            clip_seconds,
-            lg_num,
-            lgr_num,
-            device,
-        )
-        self.hps_ms = self.svc_object.hps_ms
-        self.spk2id = self.svc_object.spk2id
-        self.speech_encoder = self.svc_object.speech_encoder
+            self.svc = svc
+            self.svc_object = self.get_svc(
+                svc,
+                model_path,
+                config,
+                threshold,
+                use_spk_mix,
+                pad_seconds,
+                clip_seconds,
+                lg_num,
+                lgr_num,
+                device,
+            )
+            self.hps_ms = config
+            self.spk2id = self.svc_object.spk2id
+            self.speech_encoder = self.svc_object.speech_encoder
+        else:
+            # else you can just use the existing model. Just change some other parameters
+            self.threshold = threshold
+            self.pad_seconds = pad_seconds
+            self.clip_seconds = clip_seconds
+            self.lg_num = lg_num
+            self.lgr_num = lgr_num
+            self.svc_object.update(
+                pad_seconds, clip_seconds, lg_num, lgr_num, threshold
+            )
 
     def get_svc(
         self,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from logging import getLogger
-from typing import Any, Literal
+from typing import Any, Literal, Optional, List
 
 import numpy as np
 import torch
@@ -11,6 +11,7 @@ from torch import FloatTensor, Tensor
 
 LOG = getLogger(__name__)
 
+
 class f0Manager:
     def __init__(self):
         self.device = "cpu"
@@ -19,12 +20,23 @@ class f0Manager:
         self.f0_min = 50.0
         self.f0_mel_min = 1127 * np.log(1 + self.f0_min / 700)
         self.f0_mel_max = 1127 * np.log(1 + self.f0_max / 700)
-        self.f0_modes = ["crepe", "rmvpe", "fcpe"]
-        self.f0_predictor = None
-        self.f0_predictor_object = None
+        self.f0_modes: List[str] = ["crepe", "rmvpe", "fcpe"]
+        self.f0_predictor: Optional[str] = None
+        self.f0_predictor_object: Optional[Any] = None
+        self.hop_size: int = 512
+        self.target_sample: int = 44100
+        self.cr_threshold: float = 0.05
 
-    def initialize(self, f0_predictor, hop_size=512, target_sample=44100, device="cpu", cr_threshold=0.05, trans=0.0):
-        '''
+    def initialize(
+        self,
+        f0_predictor: str,
+        hop_size: int = 512,
+        target_sample: int = 44100,
+        device: str = "cpu",
+        cr_threshold: float = 0.05,
+        trans: float = 0.0,
+    ):
+        """
 
         Args:
             f0_predictor: ['crepe', 'rmvpe', 'fcpe']
@@ -34,20 +46,26 @@ class f0Manager:
             cr_threshold: threshold for f0 predictor(default: 0.05)(higher -> more silent frames, but precise)
 
         Returns: f0_predictor
-        '''
+        """
 
         # if the arguments are different, reinitialize the f0_predictor
-        if self.f0_predictor != f0_predictor or \
-                self.hop_size != hop_size or self.target_sample != target_sample or self.device != device or \
-                self.cr_threshold != cr_threshold:
+        if (
+            self.f0_predictor != f0_predictor
+            or self.hop_size != hop_size
+            or self.target_sample != target_sample
+            or self.device != device
+            or self.cr_threshold != cr_threshold
+        ):
             self.f0_predictor = f0_predictor
-            self.f0_predictor_object = self.get_f0_predictor(f0_predictor=f0_predictor,
-                                                              hop_length=hop_size,
-                                                              f0_min=self.f0_min,
-                                                              f0_max=self.f0_max,
-                                                              sampling_rate=target_sample,
-                                                              device=device,
-                                                              threshold=cr_threshold)
+            self.f0_predictor_object = self.get_f0_predictor(
+                f0_predictor=f0_predictor,
+                hop_length=hop_size,
+                f0_min=self.f0_min,
+                f0_max=self.f0_max,
+                sampling_rate=target_sample,
+                device=device,
+                threshold=cr_threshold,
+            )
 
             print(f"Initialized f0 predictor on {device}.")
 
@@ -60,23 +78,48 @@ class f0Manager:
 
         return self.f0_predictor_object
 
-    def get_f0_predictor(self, f0_predictor, hop_length, f0_min, f0_max, sampling_rate, **kargs):
+    def get_f0_predictor(
+        self, f0_predictor, hop_length, f0_min, f0_max, sampling_rate, **kargs
+    ):
         if f0_predictor == "crepe":
             from modules.F0Predictor.CrepeF0Predictor import CrepeF0Predictor
-            f0_predictor_object = CrepeF0Predictor(hop_length=hop_length, f0_min=f0_min, f0_max=f0_max, sampling_rate=sampling_rate,
-                                                   device=kargs["device"], threshold=kargs["threshold"])
+
+            f0_predictor_object = CrepeF0Predictor(
+                hop_length=hop_length,
+                f0_min=f0_min,
+                f0_max=f0_max,
+                sampling_rate=sampling_rate,
+                device=kargs["device"],
+                threshold=kargs["threshold"],
+            )
         elif f0_predictor == "rmvpe":
             from modules.F0Predictor.RMVPEF0Predictor import RMVPEF0Predictor
-            f0_predictor_object = RMVPEF0Predictor(hop_length=hop_length, f0_min=f0_min, f0_max=f0_max, sampling_rate=sampling_rate,
-                                                   dtype=torch.float32, device=kargs["device"],
-                                                   threshold=kargs["threshold"])
+
+            f0_predictor_object = RMVPEF0Predictor(
+                hop_length=hop_length,
+                f0_min=f0_min,
+                f0_max=f0_max,
+                sampling_rate=sampling_rate,
+                dtype=torch.float32,
+                device=kargs["device"],
+                threshold=kargs["threshold"],
+            )
         elif f0_predictor == "fcpe":
             from modules.F0Predictor.FCPEF0Predictor import FCPEF0Predictor
-            f0_predictor_object = FCPEF0Predictor(hop_length=hop_length, f0_min=f0_min, f0_max=f0_max, sampling_rate=sampling_rate,
-                                                  dtype=torch.float32, device=kargs["device"],
-                                                  threshold=kargs["threshold"])
+
+            f0_predictor_object = FCPEF0Predictor(
+                hop_length=hop_length,
+                f0_min=f0_min,
+                f0_max=f0_max,
+                sampling_rate=sampling_rate,
+                dtype=torch.float32,
+                device=kargs["device"],
+                threshold=kargs["threshold"],
+            )
         else:
-            raise Exception(f"Unsupported f0 predictor: {f0_predictor}, available: {self.f0_modes}")
+            raise Exception(
+                f"Unsupported f0 predictor: {f0_predictor}, available: {self.f0_modes}"
+            )
         return f0_predictor_object
 
     def compute_f0_uv_tran(self, wav):
@@ -96,17 +139,20 @@ class f0Manager:
         f0, uv = self.f0_predictor_object.compute_f0_uv(wav)
         return f0, uv
 
-
     def f0_to_coarse(self, f0: torch.Tensor | float):
         is_torch = isinstance(f0, torch.Tensor)
-        f0_mel = 1127 * (1 + f0 / 700).log() if is_torch else 1127 * np.log(1 + f0 / 700)
-        f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - self.f0_mel_min) * (self.f0_bin - 2) / (
-            self.f0_mel_max - self.f0_mel_min
-        ) + 1
+        f0_mel = (
+            1127 * (1 + f0 / 700).log() if is_torch else 1127 * np.log(1 + f0 / 700)
+        )
+        f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - self.f0_mel_min) * (
+            self.f0_bin - 2
+        ) / (self.f0_mel_max - self.f0_mel_min) + 1
 
         f0_mel[f0_mel <= 1] = 1
         f0_mel[f0_mel > self.f0_bin - 1] = self.f0_bin - 1
-        f0_coarse = (f0_mel + 0.5).long() if is_torch else np.rint(f0_mel).astype(np.int)
+        f0_coarse = (
+            (f0_mel + 0.5).long() if is_torch else np.rint(f0_mel).astype(np.int)
+        )
         assert f0_coarse.max() <= 255 and f0_coarse.min() >= 1, (
             f0_coarse.max(),
             f0_coarse.min(),
@@ -143,7 +189,6 @@ class f0Manager:
         if torch.isnan(f0_norm).any():
             exit(0)
         return f0_norm * x_mask
-
 
     def interpolate_f0(
         f0: ndarray[Any, dtype[float32]]

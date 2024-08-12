@@ -44,9 +44,10 @@ class SpeechEncoderManager:
         feature_retrieval: bool = False,
         spk2id: dict = {},
         cluster_model_path: str = None,
-        target_sample: int = 16000,
+        target_sample: int = 44100,
         unit_interpolate_mode: str = "left",
         device="cpu",
+        dtype=torch.float32,
         **kwargs,
     ):
         """
@@ -94,6 +95,7 @@ class SpeechEncoderManager:
         self.audio16k_resample_transform = torchaudio.transforms.Resample(
             target_sample, 16000
         ).to(self.device)
+        self.dtype = dtype
 
     def get_speech_encoder(self, speech_encoder, device=None, **kwargs):
         if speech_encoder == "vec768l12":
@@ -156,15 +158,16 @@ class SpeechEncoderManager:
 
     def encode(
         self,
-        wav16k: np.ndarray,
+        wav: torch.Tensor,
         speaker: Optional[str] = None,
         length: Optional[int] = 0,
+        disable_cluster: bool = False,
     ) -> torch.Tensor:
         """
         Encode the input audio and apply cluster inference if enabled.
 
         Args:
-            wav16k (np.ndarray): Input audio waveform at 16 kHz.
+            wav (torch.Tensor): Input audio waveform at target sample.
             speaker (Optional[str]): Speaker identifier for cluster inference.
 
         Returns:
@@ -173,13 +176,19 @@ class SpeechEncoderManager:
         if self.speech_encoder_object is None:
             raise Exception("Speech encoder not initialized. Call initialize() first.")
 
+        if not hasattr(self, "audio16k_resample_transform"):
+            self.audio16k_resample_transform = torchaudio.transforms.Resample(
+                self.target_sample, 16000, dtype=self.dtype
+            ).to(self.device)
+        wav16k = self.audio16k_resample_transform(wav[None, :])[0]
+
         # Encode the audio
         c = self.speech_encoder_object.encoder(wav16k)
         if length != 0:
             c = utils.repeat_expand_2d(c.squeeze(0), length, self.unit_interpolate_mode)
 
         # Apply cluster inference if enabled
-        if self.cluster_infer_ratio != 0 and self.cluster_model is not None:
+        if not disable_cluster and self.cluster_infer_ratio != 0 and self.cluster_model is not None:
             if self.feature_retrieval:
                 c = self._apply_feature_retrieval(c, speaker)
             else:
