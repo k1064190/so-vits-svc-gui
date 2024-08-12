@@ -100,7 +100,7 @@ class InferManager:
         post_processor = self.post_processing.post_processing_modes[post_processing]
         self.post_processing.initialize(post_processor, model_path, config_path, device)
 
-    def load_model(self, common: Dict[str, Any], path: Dict[str, str], device: str):
+    def load_model(self, common: Dict[str, Any], path: Dict[str, Any], device: str):
         f0 = common["f0"]
         cr_threshold = common["cr_threshold"]
         transposition = common["pitch_shift"]
@@ -172,6 +172,10 @@ class InferManager:
         noise_scale: float,
         use_spk_mix: bool,
         loudness_envelope_adjustment: float,
+        enhancer_adaptive_key: float,
+        k_step: int,
+        second_encoding: bool,
+        use_volume: bool,
     ) -> torch.Tensor:
         wav = self.svc.infer_slice(
             raw_audio_path,
@@ -181,6 +185,10 @@ class InferManager:
             noise_scale,
             use_spk_mix,
             loudness_envelope_adjustment,
+            enhancer_adaptive_key,
+            k_step,
+            second_encoding,
+            use_volume
         )
         return wav
 
