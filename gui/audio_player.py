@@ -191,7 +191,17 @@ class AudioPlayer(pg.PlotWidget):
         self.player.setPosition(0)
 
     def get_f0(self):
-        return torch.tensor(self.y_data).unsqueeze(0) if self.y_data is not None else None
+        return torch.from_numpy(self.y_data).unsqueeze(0) if self.y_data is not None else None
+
+    def clear_player(self):
+        # reset datas and audio player, plot
+        self.available = False
+        self.x_data = None
+        self.y_data = None
+        self.clear()
+        self.player.setMedia(QMediaContent())
+        self._reset_player()
+
 
     # The following methods remain unchanged
     def wheelEvent(self, event):
