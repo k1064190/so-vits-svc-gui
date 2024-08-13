@@ -155,8 +155,7 @@ class InferManager:
         )
 
     def get_f0(self, raw_audio_path: str) -> Tuple[torch.Tensor, int, int]:
-        f0, target_sr, hop_size = self.svc.get_f0(raw_audio_path)
-        print(f"f0: {f0}")
+        f0, target_sr, hop_size = self.svc.get_f0(raw_audio_path)   # f0: [1, T]
         return f0, target_sr, hop_size
 
     def f0_to_wav(self, f0: torch.Tensor) -> torch.Tensor:

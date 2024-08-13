@@ -783,7 +783,7 @@ class SVCManager:
     def get_f0(self, raw_audio_path: str) -> Tuple[torch.Tensor, int, int]:
         # Load the audio file to target sampling rate
         wav, _, sr, hop_size = self.svc_object.load_wav(raw_audio_path)
-        f0, _ = self.svc_object.f0_manager.compute_f0_uv_tran(wav)
+        f0, _ = self.svc_object.f0_manager.compute_f0_uv_tran(wav)  # [1, T]
 
         return f0, sr, hop_size
 
@@ -815,6 +815,19 @@ class SVCManager:
             use_volume,
         )
         return audio
+
+    def infer_slice_with_f0(
+        self,
+        raw_audio_path: str,
+        f0: torch.Tensor,
+        spk: Union[str, torch.Tensor],
+        slice_db: float,
+        auto_predict_f0: bool,
+        noice_scale: float,
+        use_spk_mix: bool,
+        loudness_envelope_adjustment: float,
+    ):
+        pass
 
     def realtime_infer(self):
         pass
