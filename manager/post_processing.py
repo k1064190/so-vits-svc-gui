@@ -35,6 +35,12 @@ class PostProcessingManager:
                 post_processing, model_path, config_path
             )
 
+            print(f"Done initializing post processing: {post_processing} on {device}")
+
+        self.device = device
+        self.model_path = model_path
+        self.config_path = config_path
+
     def get_pp(
         self,
         post_processing: str,

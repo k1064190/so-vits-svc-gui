@@ -189,6 +189,9 @@ class InferenceTab(QWidget):
             "linear_gradient_retain": 0,
             "cluster_infer_ratio": 0,
             "loudness_envelope_adjustment": 0,
+            "enhancer_adaptive_key": 0,
+            "k_step": 0,
+            "second_encoding": False,
             "retrieval": False,
             "f0_modification": False,
             "use_volume": False,
@@ -348,8 +351,8 @@ class InferenceTab(QWidget):
         checkboxes = [
             ("Feature Retrieval(Cluster required)", "retrieval"),
             ("Auto predict F0", "auto_predict_f0"),
-            ("Use volume", "use_volume", True),
-            ("Use multiple speakers(Not supported Yet)", "use_spk_mix", False),
+            ("Use volume", "use_volume", 0, True),
+            ("Use multiple speakers(Not supported Yet)", "use_spk_mix"),
         ]
 
         for checkbox_info in checkboxes:
@@ -400,6 +403,26 @@ class InferenceTab(QWidget):
         )
         layout.addWidget(self.pp_model_path)
         layout.addWidget(self.pp_config_path)
+
+        # Settings(enhancer_adaptive_key, k_step, second_encoding)
+        sliders = [
+            ("Enhancer Adaptive Key", 0, 0, 100, 1, "enhancer_adaptive_key"),
+            ("K Step", 100, 0, 200, 1, "k_step"),
+        ]
+
+        for slider_info in sliders:
+            layout.addWidget(self._create_slider(*slider_info, self.common_arguments))
+
+        checkboxes = [
+            ("Second Encoding", "second_encoding"),
+        ]
+
+        for checkbox_info in checkboxes:
+            layout.addWidget(
+                self._create_check_box(
+                    *checkbox_info, arguments_dict=self.common_arguments
+                )
+            )
 
         # Add explaining text
         layout.addWidget(QLabel("NSFHifiGAN doesn't need config path(model and config file should be in the same folder)"))
@@ -896,11 +919,16 @@ class InferenceTab(QWidget):
                 self.common_arguments["noise_scale"],
                 self.common_arguments["use_spk_mix"],
                 self.common_arguments["loudness_envelope_adjustment"],
+                self.common_arguments["enhancer_adaptive_key"],
+                self.common_arguments["k_step"],
+                self.common_arguments["second_encoding"],
+                self.common_arguments["use_volume"],
             )
         else:
             f0 = f0.to(device)
             # TODO: Implement f0 modification
             # wav = self.inference_manager.infer_with_f0(input_audio_path, f0)
+            wav = None
 
         output_audio_path = self.file_arguments["output_audio"]
         self._save_wav(
