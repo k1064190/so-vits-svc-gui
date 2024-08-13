@@ -425,20 +425,24 @@ class InferenceTab(QWidget):
             )
 
         # Add explaining text
-        layout.addWidget(QLabel("NSFHifiGAN doesn't need config path(model and config file should be in the same folder)"))
+        layout.addWidget(
+            QLabel(
+                "NSFHifiGAN doesn't need config path(model and config file should be in the same folder)"
+            )
+        )
 
     def _create_file_group(self) -> QGroupBox:
         file_group = QGroupBox("File")
         file_layout = QVBoxLayout(file_group)
-        file_layout.addWidget(
-            self._create_path_input(
-                "Input audio path",
-                "Select Input Audio File",
-                self.file_arguments,
-                "input_audio",
-                directory=get_supported_file_types_concat(),
-            )
+        self.input_widget = self._create_path_input(
+            "Input audio path",
+            "Select Input Audio File",
+            self.file_arguments,
+            "input_audio",
+            directory=get_supported_file_types_concat(),
         )
+
+        file_layout.addWidget(self.input_widget)
         file_layout.addWidget(
             self._create_path_input(
                 "Output audio path",
@@ -455,6 +459,11 @@ class InferenceTab(QWidget):
         play_button = QPushButton("Play/Pause")
         file_layout.addWidget(play_button)
         play_button.clicked.connect(self.graph.toggle_play_pause)
+
+        # If the input audio path is changed, clear audio player
+        input_line_edit = self.input_widget.layout().itemAt(1).widget()
+        input_line_edit.textChanged.connect(self.clear_f0)
+
         return file_group
 
     def _create_run_arguments_group(self) -> QGroupBox:
@@ -473,6 +482,13 @@ class InferenceTab(QWidget):
         self.run_button = self._create_button("Run", self.on_run_button_click)
         run_arguments_layout.addWidget(self.run_button)
         return run_arguments_group
+
+    def enable_apply_f0(self):
+        # If self.graph has y_data, enable apply_f0_widget
+        if self.graph.get_f0() is not None:
+            self.apply_f0_widget.setEnabled(True)
+        else:
+            self.apply_f0_widget.setEnabled(False)
 
     def on_run_button_click(self):
         self.run_button.setEnabled(False)
@@ -624,7 +640,6 @@ class InferenceTab(QWidget):
             )
             if file_path:
                 line_edit.setText(file_path)
-                update()
 
         def open_save_dialog() -> None:
             file_path, _ = QFileDialog.getSaveFileName(
@@ -632,7 +647,6 @@ class InferenceTab(QWidget):
             )
             if file_path:
                 line_edit.setText(file_path)
-                update()
 
         def open_folder() -> None:
             path = line_edit.text()
@@ -765,7 +779,9 @@ class InferenceTab(QWidget):
                 if arguments_dict[var_name] == idx:
                     radio_button.setChecked(True)
                 radio_button.toggled.connect(
-                    partial(lambda: update(idx) if radio_button.isChecked() else None, idx)
+                    partial(
+                        lambda: update(idx) if radio_button.isChecked() else None, idx
+                    )
                 )
             layout.addWidget(radio_button)
 
@@ -878,6 +894,8 @@ class InferenceTab(QWidget):
         if not self._check_availability():
             return
 
+        self.apply_f0_widget.setEnabled(False)
+
         device = self._current_device()
         self.inference_manager.load_model(
             self.common_arguments, self.path_arguments, device
@@ -892,9 +910,13 @@ class InferenceTab(QWidget):
 
     def apply_f0(self):
         device = self._current_device()
-        new_f0 = self.graph.get_f0().to(device)
+        new_f0 = self.graph.get_f0().to(device)  # [1, T]
         wav = self.inference_manager.f0_to_wav(new_f0)
         self.graph.load_audio(wav, self.graph.sample_rate)
+
+    def clear_f0(self):
+        self.graph.clear_player()
+        self.enable_apply_f0()
 
     def run(self):
         if not self._check_availability():
@@ -925,7 +947,7 @@ class InferenceTab(QWidget):
                 self.common_arguments["use_volume"],
             )
         else:
-            f0 = f0.to(device)
+            f0 = f0.to(device)  # [1, T]
             # TODO: Implement f0 modification
             # wav = self.inference_manager.infer_with_f0(input_audio_path, f0)
             wav = None
