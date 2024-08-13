@@ -51,9 +51,9 @@ class PostProcessingManager:
         if post_processing == "none":
             return None
         elif post_processing == "NSF-HifiGAN":
-            return NSFHifiGAN()
+            return NSFHifiGAN(enhancer_ckpt=model_path, device=device)
         elif post_processing == "shallow_diffusion":
-            return ShallowDiffusion(model_path, config_path, device)
+            return ShallowDiffusion(diffusion_model_path=model_path, diffusion_config_path=config_path, device=device)
         else:
             raise Exception(
                 f"Unsupported post processing: {post_processing}, available: {self.post_processing_modes}"
