@@ -26,6 +26,7 @@ class f0Manager:
         self.hop_size: int = 512
         self.target_sample: int = 44100
         self.cr_threshold: float = 0.05
+        self.dtype = torch.float32
 
     def initialize(
         self,
@@ -122,11 +123,11 @@ class f0Manager:
             )
         return f0_predictor_object
 
-    def compute_f0_uv_tran(self, wav):
+    def compute_f0_uv_tran(self, wav: np.ndarray):
         f0, uv = self.f0_predictor_object.compute_f0_uv(wav)
 
-        f0 = torch.FloatTensor(f0).to(self.device)
-        uv = torch.FloatTensor(uv).to(self.device)
+        f0 = torch.tensor(f0, dtype=self.dtype, device=self.device)
+        uv = torch.tensor(uv, dtype=self.dtype, device=self.device)
 
         f0 = f0.unsqueeze(0)
         uv = uv.unsqueeze(0)
