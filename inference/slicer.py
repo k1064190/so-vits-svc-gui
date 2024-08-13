@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, Callable
+from typing import Any, Iterable, Callable, Dict, List, Tuple
 
 import attrs
 import librosa
@@ -178,9 +178,9 @@ class Slicer:
             return chunk_dict
 
 
-def cut(audio_path, db_thresh=-30, min_len=5000):
-    audio, sr = librosa.load(audio_path, sr=None)
-    slicer = Slicer(sr=sr, threshold=db_thresh, min_length=min_len)
+def cut(audio_path, db_thresh=-30, min_len=5000, sr=None, hop_size=20):
+    audio, sr = librosa.load(audio_path, sr=sr)
+    slicer = Slicer(sr=sr, threshold=db_thresh, min_length=min_len, hop_size=hop_size)
     chunks = slicer.slice(audio)
     return chunks
 
@@ -200,3 +200,28 @@ def chunks2audio(audio_path, chunks, sr=44100, dtype=np.float32):
         if tag[0] != tag[1]:
             result.append((v["slice"], audio[int(tag[0]) : int(tag[1])]))
     return result, sr
+
+
+def chunks2f0(
+    f0: np.ndarray, chunks: Dict[str, Any], f0_frame_duration: float
+) -> List[Tuple[bool, np.ndarray]]:
+    """
+    Slice the f0 data according to the chunks.
+
+    Args:
+        f0 (np.ndarray): The f0 data array.
+        chunks (Dict[str, Any]): The chunks dictionary returned by the cut method.
+
+    Returns:
+        List[Tuple[bool, np.ndarray]]: A list of tuples, each containing a boolean (is_slice)
+                                       and the corresponding f0 chunk.
+    """
+    result = []
+    for k, v in chunks.items():
+        start, end = map(int, v["split_time"].split(","))
+        if start != end:
+            start = int(start / f0_frame_duration)
+            end = int(end / f0_frame_duration)
+            f0_chunk = f0[start:end]
+            result.append((v["slice"], f0_chunk))
+    return result
