@@ -2,6 +2,7 @@ import gc
 import json
 from typing import Optional, Any, Dict, Union, Tuple
 
+import numpy as np
 import torch
 
 import utils
@@ -155,10 +156,10 @@ class InferManager:
         )
 
     def get_f0(self, raw_audio_path: str) -> Tuple[torch.Tensor, int, int]:
-        f0, target_sr, hop_size = self.svc.get_f0(raw_audio_path)   # f0: [1, T]
+        f0, target_sr, hop_size = self.svc.get_f0(raw_audio_path)  # f0: [1, T]
         return f0, target_sr, hop_size
 
-    def f0_to_wav(self, f0: torch.Tensor) -> torch.Tensor:
+    def f0_to_wav(self, f0: torch.Tensor) -> np.ndarray:
         wav, sr = self.svc.f0_to_wav(f0)
         return wav  # [S]
 
@@ -171,11 +172,11 @@ class InferManager:
         noise_scale: float,
         use_spk_mix: bool,
         loudness_envelope_adjustment: float,
-        enhancer_adaptive_key: float,
+        enhancer_adaptive_key: int,
         k_step: int,
         second_encoding: bool,
         use_volume: bool,
-    ) -> torch.Tensor:
+    ) -> np.ndarray:
         wav = self.svc.infer_slice(
             raw_audio_path,
             spk,
@@ -187,21 +188,25 @@ class InferManager:
             enhancer_adaptive_key,
             k_step,
             second_encoding,
-            use_volume
+            use_volume,
         )
         return wav
 
     def infer_with_f0(
         self,
         raw_audio_path: str,
-        f0: torch.Tensor,
+        f0: np.ndarray,
         spk: str,
         slice_db: float,
         auto_predict_f0: bool,
         noise_scale: float,
         use_spk_mix: bool,
         loudness_envelope_adjustment: float,
-    ) -> torch.Tensor:
+        enhancer_adaptive_key:int,
+        k_step: int,
+        second_encoding: bool,
+        use_volume: bool,
+    ) -> np.ndarray:
         wav = self.svc.infer_slice_with_f0(
             raw_audio_path,
             f0,
@@ -211,6 +216,10 @@ class InferManager:
             noise_scale,
             use_spk_mix,
             loudness_envelope_adjustment,
+            enhancer_adaptive_key,
+            k_step,
+            second_encoding,
+            use_volume,
         )
         return wav
 
