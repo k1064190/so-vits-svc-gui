@@ -68,7 +68,7 @@ class f0Manager:
                 threshold=cr_threshold,
             )
 
-            print(f"Initialized f0 predictor on {device}.")
+            print(f"Initialized {f0_predictor} f0 predictor on {device}")
 
         self.device = device
 
