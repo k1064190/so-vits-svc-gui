@@ -83,6 +83,7 @@ class Slicer:
             while end - current_start > 0:
                 chunk_length = min(self.max_chunk_length, end - current_start)
                 # Merge with previous chunk if current chunk is too short and previous is non-silent
+                # scenario2: Long Silence + Short Audio ( Even if the audio is short, it should be a separate chunk if prev chunk is silent)
                 if (chunk_length < self.min_chunk_length and chunk_id > 0 and
                         not chunks[str(chunk_id - 1)]["slice"]):
                     prev_chunk = chunks[str(chunk_id - 1)]
