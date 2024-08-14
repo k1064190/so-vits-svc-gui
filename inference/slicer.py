@@ -12,175 +12,114 @@ import torchaudio
 class Slicer:
     def __init__(
         self,
-        sr: int,
+        sr: int = 44100,
         threshold: float = -40.0,
-        min_length: int = 5000,
-        min_interval: int = 300,
-        hop_size: int = 20,
-        max_sil_kept: int = 5000,
+        hop_size: int = 512,
+        min_silence_seconds: float = 1.0,
+        min_chunk_seconds: float = 0.5,
+        max_chunk_seconds: float = 40.0,
+        absolute_threshold: bool = True,
     ):
-        if not min_length >= min_interval >= hop_size:
-            raise ValueError(
-                "The following condition must be satisfied: min_length >= min_interval >= hop_size"
-            )
-        if not max_sil_kept >= hop_size:
-            raise ValueError(
-                "The following condition must be satisfied: max_sil_kept >= hop_size"
-            )
-        min_interval = sr * min_interval / 1000
-        self.threshold = 10 ** (threshold / 20.0)
-        self.hop_size = round(sr * hop_size / 1000)  # 20ms
-        self.win_size = min(round(min_interval), 4 * self.hop_size)
-        self.min_length = round(sr * min_length / 1000 / self.hop_size)
-        self.min_interval = round(min_interval / self.hop_size)
-        self.max_sil_kept = round(sr * max_sil_kept / 1000 / self.hop_size)
+        """
+        Initialize the slicer.
+        :param sr: target audio sample rate
+        :param threshold: the threshold in dB below which a frame is considered silent
+        :param min_length: the minimum length of a slice in samples
+        :param hop_size: the hop size in samples
+        """
+        self.sr = sr
+        self.threshold = -threshold
+        self.hop_size = hop_size
+        self.min_silence_length = int(min_silence_seconds * sr)
+        self.min_chunk_length = int(min_chunk_seconds * sr)
+        self.max_chunk_length = int(max_chunk_seconds * sr)
+        self.absolute_threshold = absolute_threshold
 
-    def _apply_slice(self, waveform, begin, end):
-        if len(waveform.shape) > 1:
-            return waveform[
-                :, begin * self.hop_size : min(waveform.shape[1], end * self.hop_size)
-            ]
+    def slice(self, audio):
+        # Convert stereo to mono if necessary
+        if len(audio.shape) > 1:
+            samples = librosa.to_mono(audio)
         else:
-            return waveform[
-                begin * self.hop_size : min(waveform.shape[0], end * self.hop_size)
-            ]
+            samples = audio
 
-    # @timeit
-    def slice(self, waveform):
-        if len(waveform.shape) > 1:
-            samples = librosa.to_mono(waveform)
-        else:
-            samples = waveform
-        if samples.shape[0] <= self.min_length:
-            return {"0": {"slice": False, "split_time": f"0,{len(waveform)}"}}
-        rms_list = librosa.feature.rms(
-            y=samples, frame_length=self.win_size, hop_length=self.hop_size
-        ).squeeze(0)
-        sil_tags = []
-        silence_start = None
-        clip_start = 0
-        for i, rms in enumerate(rms_list):
-            # Keep looping while frame is silent.
-            if rms < self.threshold:
-                # Record start of silent frames.
-                if silence_start is None:
-                    silence_start = i
-                continue
-            # Keep looping while frame is not silent and silence start has not been recorded.
-            if silence_start is None:
-                continue
-            # Clear recorded silence start if interval is not enough or clip is too short
-            is_leading_silence = silence_start == 0 and i > self.max_sil_kept
-            need_slice_middle = (
-                i - silence_start >= self.min_interval
-                and i - clip_start >= self.min_length
-            )
-            if not is_leading_silence and not need_slice_middle:
-                silence_start = None
-                continue
-            # Need slicing. Record the range of silent frames to be removed.
-            if i - silence_start <= self.max_sil_kept:
-                pos = rms_list[silence_start : i + 1].argmin() + silence_start
-                if silence_start == 0:
-                    sil_tags.append((0, pos))
-                else:
-                    sil_tags.append((pos, pos))
-                clip_start = pos
-            elif i - silence_start <= self.max_sil_kept * 2:
-                pos = rms_list[
-                    i - self.max_sil_kept : silence_start + self.max_sil_kept + 1
-                ].argmin()
-                pos += i - self.max_sil_kept
-                pos_l = (
-                    rms_list[
-                        silence_start : silence_start + self.max_sil_kept + 1
-                    ].argmin()
-                    + silence_start
-                )
-                pos_r = (
-                    rms_list[i - self.max_sil_kept : i + 1].argmin()
-                    + i
-                    - self.max_sil_kept
-                )
-                if silence_start == 0:
-                    sil_tags.append((0, pos_r))
-                    clip_start = pos_r
-                else:
-                    sil_tags.append((min(pos_l, pos), max(pos_r, pos)))
-                    clip_start = max(pos_r, pos)
+        # Return a single chunk if the audio is shorter than the minimum length
+        if samples.shape[0] <= self.min_silence_length:
+            return {"0": {"slice": False, "split_time": f"0,{len(samples)}"}}
+
+        # Detect non-silent regions
+        non_silence_indices = librosa.effects.split(
+            samples,
+            top_db=self.threshold,
+            ref=1.0 if self.absolute_threshold else np.max,
+            frame_length=2 * self.hop_size,
+            hop_length=self.hop_size,
+        )
+
+        last_end = 0
+        chunks = {}
+        chunk_id = 0
+        merge_chunk = False
+
+        for start, end in non_silence_indices:
+            # Process silent region if it's long enough
+            if start - last_end >= self.min_silence_length or chunk_id == 0:
+                chunks[str(chunk_id)] = {
+                    "slice": True,
+                    "split_time": f"{last_end},{start}"
+                }
+                chunk_id += 1
+                last_end = start
             else:
-                pos_l = (
-                    rms_list[
-                        silence_start : silence_start + self.max_sil_kept + 1
-                    ].argmin()
-                    + silence_start
-                )
-                pos_r = (
-                    rms_list[i - self.max_sil_kept : i + 1].argmin()
-                    + i
-                    - self.max_sil_kept
-                )
-                if silence_start == 0:
-                    sil_tags.append((0, pos_r))
+                merge_chunk = True
+
+            if merge_chunk:
+                # scenario1: Audio + Short Silence + Audio ( Merge two audio chunks with short silence in between)
+                merge_chunk = False
+                chunk_id -= 1
+                current_start = int(chunks[str(chunk_id)]["split_time"].split(',')[0])
+            else:
+                # normal scenario
+                current_start = last_end
+            while end - current_start > 0:
+                chunk_length = min(self.max_chunk_length, end - current_start)
+                # Merge with previous chunk if current chunk is too short and previous is non-silent
+                if (chunk_length < self.min_chunk_length and chunk_id > 0 and
+                        not chunks[str(chunk_id - 1)]["slice"]):
+                    prev_chunk = chunks[str(chunk_id - 1)]
+                    prev_start = int(prev_chunk["split_time"].split(',')[0])
+                    chunks[str(chunk_id - 1)] = {
+                        "slice": False,
+                        "split_time": f"{prev_start},{current_start + chunk_length}"
+                    }
                 else:
-                    sil_tags.append((pos_l, pos_r))
-                clip_start = pos_r
-            silence_start = None
-        # Deal with trailing silence.
-        total_frames = rms_list.shape[0]
-        if (
-            silence_start is not None
-            and total_frames - silence_start >= self.min_interval
-        ):
-            silence_end = min(total_frames, silence_start + self.max_sil_kept)
-            pos = rms_list[silence_start : silence_end + 1].argmin() + silence_start
-            sil_tags.append((pos, total_frames + 1))
-        # Apply and return slices.
-        if len(sil_tags) == 0:
-            return {"0": {"slice": False, "split_time": f"0,{len(waveform)}"}}
-        else:
-            chunks = []
-            # 第一段静音并非从头开始，补上有声片段
-            if sil_tags[0][0]:
-                chunks.append(
-                    {
+                    # Create a new chunk
+                    chunks[str(chunk_id)] = {
                         "slice": False,
-                        "split_time": f"0,{min(waveform.shape[0], sil_tags[0][0] * self.hop_size)}",
+                        "split_time": f"{current_start},{current_start + chunk_length}"
                     }
-                )
-            for i in range(0, len(sil_tags)):
-                # 标识有声片段（跳过第一段）
-                if i:
-                    chunks.append(
-                        {
-                            "slice": False,
-                            "split_time": f"{sil_tags[i - 1][1] * self.hop_size},{min(waveform.shape[0], sil_tags[i][0] * self.hop_size)}",
-                        }
-                    )
-                # 标识所有静音片段
-                chunks.append(
-                    {
-                        "slice": True,
-                        "split_time": f"{sil_tags[i][0] * self.hop_size},{min(waveform.shape[0], sil_tags[i][1] * self.hop_size)}",
-                    }
-                )
-            # 最后一段静音并非结尾，补上结尾片段
-            if sil_tags[-1][1] * self.hop_size < len(waveform):
-                chunks.append(
-                    {
-                        "slice": False,
-                        "split_time": f"{sil_tags[-1][1] * self.hop_size},{len(waveform)}",
-                    }
-                )
-            chunk_dict = {}
-            for i in range(len(chunks)):
-                chunk_dict[str(i)] = chunks[i]
-            return chunk_dict
+                    chunk_id += 1
+
+                current_start += chunk_length
+
+            last_end = end
+
+        chunks[str(chunk_id)] = {
+            "slice": True,
+            "split_time": f"{last_end},{len(samples)}"
+        }
+
+        return chunks
 
 
-def cut(audio_path, db_thresh=-30, min_len=5000, sr=None, hop_size=20):
+def cut(audio_path, db_thresh=-30, min_len=0.5, sr=None, hop_size=512):
     audio, sr = librosa.load(audio_path, sr=sr)
-    slicer = Slicer(sr=sr, threshold=db_thresh, min_length=min_len, hop_size=hop_size)
+    slicer = Slicer(sr=sr, threshold=db_thresh, min_chunk_seconds=min_len, hop_size=hop_size)
+    chunks = slicer.slice(audio)
+    return chunks
+
+
+def cut_with_audio(audio, db_thresh=-30, min_len=0.5, sr=44100, hop_size=512):
+    slicer = Slicer(sr=sr, threshold=db_thresh, min_chunk_seconds=min_len, hop_size=hop_size)
     chunks = slicer.slice(audio)
     return chunks
 
@@ -197,13 +136,12 @@ def chunks2audio(audio_path, chunks, sr=44100, dtype=np.float32):
     result = []
     for k, v in chunks.items():
         tag = v["split_time"].split(",")
-        if tag[0] != tag[1]:
-            result.append((v["slice"], audio[int(tag[0]) : int(tag[1])]))
+        result.append((v["slice"], audio[int(tag[0]) : int(tag[1])]))
     return result, sr
 
 
 def chunks2f0(
-    f0: np.ndarray, chunks: Dict[str, Any], f0_frame_duration: float
+    f0: np.ndarray, chunks: Dict[str, Any], hop_size: int
 ) -> List[Tuple[bool, np.ndarray]]:
     """
     Slice the f0 data according to the chunks.
@@ -219,9 +157,8 @@ def chunks2f0(
     result = []
     for k, v in chunks.items():
         start, end = map(int, v["split_time"].split(","))
-        if start != end:
-            start = int(start / f0_frame_duration)
-            end = int(end / f0_frame_duration)
-            f0_chunk = f0[start:end]
-            result.append((v["slice"], f0_chunk))
+        start = int(start / hop_size)
+        end = int(end / hop_size)
+        f0_chunk = f0[start:end]
+        result.append((v["slice"], f0_chunk))
     return result
