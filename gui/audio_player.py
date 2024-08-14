@@ -89,8 +89,9 @@ class AudioPlayer(pg.PlotWidget):
         self.sample_rate = sample_rate
         self.hop_size = hop_size
         self.f0_period = self._calculate_f0_period()
+        f0 = f0.squeeze()
         self.x_data = np.arange(len(f0))
-        self.y_data = f0.squeeze().cpu().numpy() if isinstance(f0, torch.Tensor) else f0
+        self.y_data = f0.cpu().numpy() if isinstance(f0, torch.Tensor) else f0
         self._plot_data()
         self.available = True
         self.adjust_view_box()
@@ -143,7 +144,8 @@ class AudioPlayer(pg.PlotWidget):
             return
         pos = self.plotItem.vb.mapSceneToView(ev.pos())
         points = self.scatter.pointsAt(pos)
-        if points:
+        # Check if points are empty or not
+        if len(points) > 0:
             self.dragPoint = points[0]
             self.dragStartPos = self.dragPoint.pos()
         elif ev.button() == QtCore.Qt.LeftButton:
