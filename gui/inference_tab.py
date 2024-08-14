@@ -3,6 +3,7 @@ import os
 from functools import partial
 from typing import Dict, Any, Optional, Callable, List, Union, Tuple
 
+import librosa
 import numpy as np
 import torchaudio
 from PyQt5.QtCore import (
@@ -58,24 +59,6 @@ class RunThread(QThread):
         result = self.function()
         self.finished.emit(result)
 
-
-class WorkerSignals(QObject):
-    finished = pyqtSignal(object)
-
-
-class Worker(QRunnable):
-    def __init__(self, fn, *args, **kwargs):
-        super(Worker, self).__init__()
-        self.fn = fn
-        self.args = args
-        self.kwargs = kwargs
-        self.signals = WorkerSignals()
-
-    def run(self):
-        result = self.fn(*self.args, **self.kwargs)
-        self.signals.finished.emit(result)
-
-
 class InferenceTab(QWidget):
     PRESET_FOLDER = "presets"
     VALUE_MULTIPLIER = 100
@@ -86,6 +69,8 @@ class InferenceTab(QWidget):
         self.init_thread.finished.connect(self._on_data_loaded)
         self.thread = RunThread(self.run)
         self.thread.finished.connect(self.on_thread_finish)
+        self.f0_thread = RunThread(self.f0_estimation)
+        self.f0_thread.finished.connect(self.on_f0_thread_finish)
         self._setup_data()
         self._setup_ui()
         self._setup_connections()
@@ -469,16 +454,15 @@ class InferenceTab(QWidget):
     def _create_run_arguments_group(self) -> QGroupBox:
         run_arguments_group = QGroupBox("Run Arguments")
         run_arguments_layout = QHBoxLayout(run_arguments_group)
-        f0_modification_widget = self._create_button(
-            "F0 Modification", self.f0_estimation
+        self.f0_modification_widget = self._create_button(
+            "F0 Modification", self.f0_thread.start
         )
-        run_arguments_layout.addWidget(f0_modification_widget)
+        run_arguments_layout.addWidget(self.f0_modification_widget)
         self.apply_f0_widget = self._create_button(
             "Apply F0 modification", self.apply_f0
         )
         run_arguments_layout.addWidget(self.apply_f0_widget)
         self.apply_f0_widget.setEnabled(False)
-        run_worker = Worker(self.run)
         self.run_button = self._create_button("Run", self.on_run_button_click)
         run_arguments_layout.addWidget(self.run_button)
         return run_arguments_group
@@ -492,11 +476,18 @@ class InferenceTab(QWidget):
 
     def on_run_button_click(self):
         self.run_button.setEnabled(False)
-
         self.thread.start()
+
+    def on_f0_button_click(self):
+        self.f0_modification_widget.setEnabled(False)
+        self.f0_thread.start()
 
     def on_thread_finish(self, result):
         self.run_button.setEnabled(True)
+
+    def on_f0_thread_finish(self, result):
+        self.f0_modification_widget.setEnabled(True)
+        self.enable_apply_f0()
 
     def _create_realtime_group(self) -> QGroupBox:
         realtime_group = QGroupBox("Realtime")
@@ -893,8 +884,7 @@ class InferenceTab(QWidget):
     def f0_estimation(self):
         if not self._check_availability():
             return
-
-        self.apply_f0_widget.setEnabled(False)
+        self.clear_f0()
 
         device = self._current_device()
         self.inference_manager.load_model(
@@ -902,16 +892,17 @@ class InferenceTab(QWidget):
         )
 
         input_audio_path = self.file_arguments["input_audio"]
-        f0, target_sr, hop_size = self.inference_manager.get_f0(input_audio_path)
-        wav = self.inference_manager.f0_to_wav(f0)
+        f0, original_wav, target_sr, hop_size = self.inference_manager.get_f0(input_audio_path)
+        wav = self.inference_manager.f0_to_wav(f0, original_wav)
         self.graph.load_f0(f0, target_sr, hop_size)
         self.graph.load_audio(wav, target_sr)
-        self.apply_f0_widget.setEnabled(True)
 
     def apply_f0(self):
         device = self._current_device()
         new_f0 = self.graph.get_f0().to(device)  # [1, T]
-        wav = self.inference_manager.f0_to_wav(new_f0)
+        input_audio_path = self.file_arguments["input_audio"]
+        original_wav = librosa.load(input_audio_path, sr=self.graph.sample_rate)[0]
+        wav = self.inference_manager.f0_to_wav(new_f0, original_wav=original_wav)
         self.graph.load_audio(wav, self.graph.sample_rate)
 
     def clear_f0(self):
@@ -948,9 +939,20 @@ class InferenceTab(QWidget):
             )
         else:
             f0 = f0.to(device)  # [1, T]
-            # TODO: Implement f0 modification
-            # wav = self.inference_manager.infer_with_f0(input_audio_path, f0)
-            wav = None
+            wav = self.inference_manager.infer_with_f0(
+                input_audio_path,
+                f0,
+                speaker,
+                self.common_arguments["silence_threshold"],
+                self.common_arguments["auto_predict_f0"],
+                self.common_arguments["noise_scale"],
+                self.common_arguments["use_spk_mix"],
+                self.common_arguments["loudness_envelope_adjustment"],
+                self.common_arguments["enhancer_adaptive_key"],
+                self.common_arguments["k_step"],
+                self.common_arguments["second_encoding"],
+                self.common_arguments["use_volume"],
+            )
 
         output_audio_path = self.file_arguments["output_audio"]
         self._save_wav(
