@@ -522,7 +522,7 @@ class Svc:
                 spk = self.spk2id.keys()[0]
                 use_spk_mix = False
         wav_path = Path(raw_audio_path).with_suffix(".wav")
-        chunks = slicer.cut(wav_path, db_thresh=slice_db)
+        chunks = slicer.cut(wav_path, db_thresh=slice_db, sr=self.target_sample, hop_size=self.hop_size)
         audio_data, audio_sr = slicer.chunks2audio(wav_path, chunks, self.target_sample)
         per_size = int(self.clip_seconds * audio_sr)
         lg_size = int(self.lg_num * audio_sr)
@@ -691,9 +691,9 @@ class Svc:
                 use_spk_mix = False
         f0_frame_duration = self.hop_size / self.target_sample  # 0.0116s
         wav_path = Path(raw_audio_path).with_suffix(".wav")
-        chunks = slicer.cut(wav_path, db_thresh=slice_db, sr=self.target_sample, hop_size=int(f0_frame_duration*1000))
+        chunks = slicer.cut(wav_path, db_thresh=slice_db, sr=self.target_sample, hop_size=self.hop_size)
         audio_data, audio_sr = slicer.chunks2audio(wav_path, chunks, self.target_sample)
-        f0_data = slicer.chunks2f0(f0, chunks, f0_frame_duration)
+        f0_data = slicer.chunks2f0(f0, chunks, hop_size=self.hop_size)
         per_size = int(self.clip_seconds * audio_sr)
         per_f0_size = int(self.clip_seconds / f0_frame_duration)
         lg_size = int(self.lg_num * audio_sr)
@@ -790,8 +790,8 @@ class Svc:
                         f"###=====segment clip start, {round(len(dat) / audio_sr, 3)}s======"
                     )
                 # padd
-                pad_len = int(audio_sr * self.pad_seconds)
                 pad_f0_len = int(self.pad_seconds / f0_frame_duration)
+                pad_len = int(pad_f0_len * self.hop_size)
                 dat = np.concatenate(
                     [
                         np.zeros([pad_len], dtype=np.float32),
@@ -824,7 +824,7 @@ class Svc:
                 )
                 global_frame += out_frame
                 _audio = out_audio.cpu().numpy()
-                pad_len = int(self.target_sample * self.pad_seconds)
+                # pad_len = int(self.target_sample * self.pad_seconds)
                 _audio = _audio[pad_len:-pad_len]
                 _audio = pad_array(_audio, per_length)
                 if lg_size != 0 and k != 0:
@@ -1014,50 +1014,62 @@ class SVCManager:
     ):
         self.svc_object.initialize(speech_encoder, f0, post_processing)
 
-    def f0_to_wav(self, f0: torch.Tensor) -> Tuple[np.ndarray, int]:
+    def f0_to_wav(self, f0: torch.Tensor, original_wav: np.ndarray) -> Tuple[np.ndarray, int]:
         # [1, T] -> [T]
-        f0 = f0.squeeze(0)
+        f0 = f0.squeeze().cpu().numpy()
         target_sr = self.svc_object.target_sample
         hop_size = self.svc_object.hop_size
-        clip_seconds = 5.0
         pad_seconds = 0.5
+
+        f0_frame_duration = hop_size / target_sr  # 0.0116s
+        chunks = slicer.cut_with_audio(original_wav, db_thresh=-40, sr=target_sr, hop_size=hop_size)
+        f0_data = slicer.chunks2f0(f0, chunks, hop_size)
 
         # f0의 길이를 기반으로 전체 오디오 길이 계산
         total_frames = len(f0)
         total_seconds = total_frames * hop_size / target_sr
 
-        # 청크 크기 및 linear gradient 크기 계산
-        chunk_size = int(clip_seconds * target_sr / hop_size)
-        chunk_sample = int(clip_seconds * target_sr)
-        pad_size = int(pad_seconds * target_sr / hop_size)
-        pad_sample = int(pad_seconds * target_sr)
+        pad_size = int(pad_seconds * target_sr / hop_size)      # 43
+        pad_sample = int(pad_size * hop_size)       # 22016
 
         # 결과 저장을 위한 리스트
-        wav = np.array([])
+        audio = np.array([])
 
-        for start in range(0, total_frames, chunk_size):
-            end = min(start + chunk_size, total_frames)
+        for (k, v), (f0_tag, f0_dat) in zip(chunks.items(), f0_data):
+            print(f"k: {k}, v: {v}, f0_tag: {f0_tag}, f0_dat: {f0_dat.shape}")
+            start, end = map(int, v["split_time"].split(","))
+            _length = end - start
+            slice_tag = v["slice"]
+            if slice_tag:
+                # add zeros to the audio
+                _audio = np.zeros(_length, dtype=np.float32)
+                audio = np.concatenate([audio, _audio])
+            else:
+                print(f"f0_dat: {f0_dat.shape[0]}, to: {f0_dat.shape[0] * hop_size}")
+                # Add padding
+                f0_dat = np.concatenate([
+                    np.zeros([pad_size], dtype=np.float32),
+                    f0_dat,
+                    np.zeros([pad_size], dtype=np.float32),
+                ])
 
-            f0_chunk = f0[start:end]
+                f0_tensor = torch.from_numpy(f0_dat).to(self.svc_object.device).to(self.svc_object.dtype).unsqueeze(0)
 
-            # Add padding
-            f0_chunk = torch.nn.functional.pad(
-                f0_chunk, (pad_size, pad_size), mode="constant", value=0
-            )
+                # apply pitch2wav
+                _audio = self.svc_object.net_g_ms.pitch2wav(f0_tensor)  # [S] numpy
+                _audio = _audio[pad_sample:-pad_sample]  # remove padding
 
-            f0_tensor = f0_chunk.unsqueeze(0).to(self.svc_object.device)  # [1, T]
 
-            # apply pitch2wav
-            wav_chunk = self.svc_object.net_g_ms.pitch2wav(f0_tensor)  # [S] numpy
+                print(f"original length: {_length}, generated length: {_audio.shape[0]}, f0 length: {f0_dat.shape[0]}")
 
-            wav_chunk = wav_chunk[pad_sample:-pad_sample]  # remove padding
+                _audio = pad_array(_audio, _length)  # pad to the original length
 
-            wav = np.concatenate([wav, wav_chunk])
+                audio = np.concatenate([audio, _audio])
 
         # Return the concatenated wav chunks numpy
-        return wav, target_sr
+        return audio, target_sr
 
-    def get_f0(self, raw_audio_path: str) -> Tuple[torch.Tensor, int, int]:
+    def get_f0(self, raw_audio_path: str) -> Tuple[torch.Tensor, np.ndarray, int, int]:
         # Load the audio file to target sampling rate
         wav, _, sr, hop_size = self.svc_object.load_wav(
             raw_audio_path
@@ -1066,7 +1078,8 @@ class SVCManager:
             wav
         )  # [1, T], T is seconds * sr / hop_length
 
-        return f0, sr, hop_size
+
+        return f0, wav, sr, hop_size
 
     def infer_slice(
         self,

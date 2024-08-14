@@ -155,12 +155,12 @@ class InferManager:
             and self.svc.svc is not None
         )
 
-    def get_f0(self, raw_audio_path: str) -> Tuple[torch.Tensor, int, int]:
-        f0, target_sr, hop_size = self.svc.get_f0(raw_audio_path)  # f0: [1, T]
-        return f0, target_sr, hop_size
+    def get_f0(self, raw_audio_path: str) -> Tuple[torch.Tensor, np.ndarray, int, int]:
+        f0, wav, target_sr, hop_size = self.svc.get_f0(raw_audio_path)  # f0: [1, T]
+        return f0, wav, target_sr, hop_size
 
-    def f0_to_wav(self, f0: torch.Tensor) -> np.ndarray:
-        wav, sr = self.svc.f0_to_wav(f0)
+    def f0_to_wav(self, f0: torch.Tensor, original_wav: np.ndarray) -> np.ndarray:
+        wav, sr = self.svc.f0_to_wav(f0, original_wav)
         return wav  # [S]
 
     def infer(
